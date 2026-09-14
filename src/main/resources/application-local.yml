@@ -39,8 +39,6 @@ spring:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
-      enable-idempotence: true
-      transaction-id-prefix: pgw-settlement-
     consumer:
       group-id: pgw-settlement-group
       auto-offset-reset: earliest

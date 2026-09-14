@@ -137,13 +137,19 @@ public final class Payment {
     }
 
     /**
-     * Resolve an UNKNOWN payment to a confirmed state.
-     * Called by the reconciliation/polling job (Stage 4).
+     * Resolve an UNKNOWN or REQUIRES_RECONCILIATION payment to a confirmed
+     * state. Called by the reconciliation/polling job (Stage 4).
+     *
+     * <p>Safe for both non-terminal awaiting-resolution states because the
+     * only legal targets are {@link PaymentStatus#SUCCEEDED} or
+     * {@link PaymentStatus#FAILED}. No money moves; the ledger is not
+     * re-posted. The provider reference, failure code and failure reason
+     * are updated only when the caller supplies a non-null value.</p>
      */
-    public void resolveUnknown(final PaymentStatus resolved,
-                               final String failureCode,
-                               final String failureReason,
-                               final String providerReference) {
+    public void resolveReconciliation(final PaymentStatus resolved,
+                                      final String failureCode,
+                                      final String failureReason,
+                                      final String providerReference) {
         this.status = PaymentStateEngine.transition(
                 this.status, resolved,
                 resolved == PaymentStatus.SUCCEEDED

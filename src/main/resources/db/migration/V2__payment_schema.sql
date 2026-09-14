@@ -8,9 +8,13 @@
 --   indexes, and optimistic-locking support.
 --
 -- Design notes:
---   * amount_minor stored as DECIMAL(18,2) — supports amounts up to
---     999,999,999,999,999.99 with 2-decimal precision for INR/USD/EUR.
---     JPY (no decimals) is stored as N.00 for uniformity.
+--   * amount_minor stores the INTEGER minor-unit count for the payment
+--     (e.g. 125000 for 1250.00 INR). The column is DECIMAL(18,2) so PostgreSQL
+--     displays it with two decimal places, but the value must always be an
+--     exact integer. The application asserts this on read (see
+--     PaymentEntity.toDomain). JPY (scale 0) and BHD/KWD/JOD/OMR (scale 3)
+--     are also stored as integer minor-unit counts — the column scale is
+--     cosmetic and must not be interpreted as the currency's decimal places.
 --   * provider_reference is UNIQUE but nullable — prevents duplicate
 --     provider responses from creating duplicate payment records.
 --   * @Version (JPA optimistic lock) maps to the version column.

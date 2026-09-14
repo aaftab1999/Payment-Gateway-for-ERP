@@ -67,6 +67,22 @@ class PaymentStateEngineTest {
         assertThat(result).isEqualTo(PaymentStatus.FAILED);
     }
 
+    @Test
+    void requiresReconciliationToSucceededIsValid() {
+        PaymentStatus result = PaymentStateEngine.transition(
+                PaymentStatus.REQUIRES_RECONCILIATION, PaymentStatus.SUCCEEDED,
+                PaymentStateEngine.TransitionReason.RECONCILIATION_MATCHED);
+        assertThat(result).isEqualTo(PaymentStatus.SUCCEEDED);
+    }
+
+    @Test
+    void requiresReconciliationToFailedIsValid() {
+        PaymentStatus result = PaymentStateEngine.transition(
+                PaymentStatus.REQUIRES_RECONCILIATION, PaymentStatus.FAILED,
+                PaymentStateEngine.TransitionReason.RECONCILIATION_FAILED);
+        assertThat(result).isEqualTo(PaymentStatus.FAILED);
+    }
+
     // --- Invalid transitions ---
 
     @Test
@@ -104,10 +120,12 @@ class PaymentStateEngineTest {
     }
 
     @Test
-    void requiresReconciliationToSucceededIsInvalid() {
+    void requiresReconciliationToUnknownIsInvalid() {
+        // REQUIRES_RECONCILIATION can only resolve to a terminal state, not back
+        // to another awaiting-resolution state.
         assertThatThrownBy(() -> PaymentStateEngine.transition(
-                PaymentStatus.REQUIRES_RECONCILIATION, PaymentStatus.SUCCEEDED,
-                PaymentStateEngine.TransitionReason.RECONCILIATION_MATCHED))
+                PaymentStatus.REQUIRES_RECONCILIATION, PaymentStatus.UNKNOWN,
+                PaymentStateEngine.TransitionReason.PROVIDER_UNKNOWN_OUTCOME))
                 .isInstanceOf(IllegalStateTransitionException.class);
     }
 
@@ -126,5 +144,28 @@ class PaymentStateEngineTest {
         assertThat(PaymentStatus.CREATED.isTerminal()).isFalse();
         assertThat(PaymentStatus.PROCESSING.isTerminal()).isFalse();
         assertThat(PaymentStatus.UNKNOWN.isTerminal()).isFalse();
+        assertThat(PaymentStatus.REQUIRES_RECONCILIATION.isTerminal()).isFalse();
+    }
+
+    @Test
+    void voidedIsTerminalAndHasNoOutgoingTransitions() {
+        // VOIDED is a future state (Stage 4+). It is terminal today and must
+        // not be reachable from any Stage 3 state.
+        assertThat(PaymentStatus.VOIDED.isTerminal()).isTrue();
+        assertThatThrownBy(() -> PaymentStateEngine.transition(
+                PaymentStatus.SUCCEEDED, PaymentStatus.VOIDED,
+                PaymentStateEngine.TransitionReason.RECONCILIATION_MATCHED))
+                .isInstanceOf(IllegalStateTransitionException.class);
+    }
+
+    @Test
+    void refundedIsTerminalAndHasNoOutgoingTransitions() {
+        // REFUNDED is a future state (Stage 4+). It is terminal today and must
+        // not be reachable from any Stage 3 state.
+        assertThat(PaymentStatus.REFUNDED.isTerminal()).isTrue();
+        assertThatThrownBy(() -> PaymentStateEngine.transition(
+                PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED,
+                PaymentStateEngine.TransitionReason.RECONCILIATION_MATCHED))
+                .isInstanceOf(IllegalStateTransitionException.class);
     }
 }

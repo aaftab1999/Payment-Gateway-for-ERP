@@ -6,6 +6,7 @@ import com.paymentgateway.settlement.api.dto.PaymentResponse;
 import com.paymentgateway.settlement.application.service.ChargeService;
 import com.paymentgateway.settlement.domain.payment.Payment;
 
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -57,34 +58,33 @@ public class PaymentController {
      */
     @PostMapping
     public ResponseEntity<PaymentResponse> createPayment(
-            @Valid @RequestBody final CreatePaymentRequest request,
+            @Valid @RequestBody final CreatePaymentRequest body,
+            final HttpServletRequest servletRequest,
             @RequestHeader(value = "X-Correlation-Id", required = false) final String correlationId,
             @RequestHeader(value = "X-Base-Url", required = false) final String baseUrl) {
 
-        UUID corrId;
-        if (correlationId != null) {
-            try {
-                corrId = UUID.fromString(correlationId);
-            } catch (IllegalArgumentException e) {
-                log.warn("Invalid correlation ID header '{}' — generating new UUID", correlationId);
-                corrId = UUID.randomUUID();
-            }
-        } else {
-            corrId = UUID.randomUUID();
+        // The correlation ID is resolved by CorrelationIdFilter and exposed as
+        // a request attribute. Reading it here guarantees the response body
+        // uses the same ID that was echoed in the response header.
+        UUID corrId = (UUID) servletRequest.getAttribute("correlationId");
+        if (corrId == null) {
+            // Fallback for tests that bypass the filter (e.g. MockMvc without
+            // the filter chain). Replicate the filter's policy exactly.
+            corrId = resolveCorrelationId(correlationId);
         }
         String base = baseUrl != null ? baseUrl : "/api/v1";
 
         log.info("Received payment request: merchant={}, billRef={}, amount={}",
-                request.merchantId(), request.billRef(), request.amount());
+                body.merchantId(), body.billRef(), body.amount());
 
         Payment payment = chargeService.charge(
-                request.merchantId(),
-                request.customerRef(),
-                request.billRef(),
-                request.amount(),
-                request.currency(),
-                request.paymentMethod(),
-                request.paymentToken(),
+                body.merchantId(),
+                body.customerRef(),
+                body.billRef(),
+                body.amount(),
+                body.currency(),
+                body.paymentMethod(),
+                body.paymentToken(),
                 corrId
         );
 
@@ -101,7 +101,8 @@ public class PaymentController {
     @GetMapping("/{paymentId}")
     public ResponseEntity<PaymentResponse> getPayment(
             @PathVariable final UUID paymentId,
-            @RequestHeader(value = "X-Base-Url", required = false) final String baseUrl) {
+            @RequestHeader(value = "X-Base-Url", required = false) final String baseUrl,
+            @RequestHeader(value = "X-Correlation-Id", required = false) final String correlationId) {
 
         String base = baseUrl != null ? baseUrl : "/api/v1";
         Payment payment = chargeService.getPayment(paymentId);
@@ -118,7 +119,8 @@ public class PaymentController {
     public ResponseEntity<List<PaymentResponse>> getPaymentsByBillReference(
             @PathVariable final String billReference,
             @RequestParam final String merchantId,
-            @RequestHeader(value = "X-Base-Url", required = false) final String baseUrl) {
+            @RequestHeader(value = "X-Base-Url", required = false) final String baseUrl,
+            @RequestHeader(value = "X-Correlation-Id", required = false) final String correlationId) {
 
         String base = baseUrl != null ? baseUrl : "/api/v1";
         List<Payment> payments = chargeService.getPaymentsByBillRef(merchantId, billReference);
@@ -126,5 +128,24 @@ public class PaymentController {
                 .map(p -> PaymentDtoMapper.toResponse(p, base))
                 .collect(Collectors.toList());
         return ResponseEntity.ok(responses);
+    }
+
+    /**
+     * Resolves the correlation ID for a request, matching the policy used by
+     * {@link CorrelationIdFilter}. Used as a fallback when the filter has not
+     * run (e.g. unit tests that bypass the filter chain).
+     *
+     * <p>Priority: use the client-supplied {@code X-Correlation-Id} header if
+     * present and valid; otherwise generate a new UUID.</p>
+     */
+    private static UUID resolveCorrelationId(final String headerValue) {
+        if (headerValue != null && !headerValue.isBlank()) {
+            try {
+                return UUID.fromString(headerValue);
+            } catch (IllegalArgumentException e) {
+                // Malformed header — generate a new UUID.
+            }
+        }
+        return UUID.randomUUID();
     }
 }

@@ -61,9 +61,10 @@ import static org.mockito.Mockito.when;
         when(processor.process(any(), anyLong(), any(), any()))
                 .thenReturn(ProviderResult.success("provider_txn_api_001"));
 
+        String validCorrelationId = "11111111-2222-3333-4444-555555555555";
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("X-Correlation-Id", "api-test-corr-001");
+        headers.set("X-Correlation-Id", validCorrelationId);
 
         CreatePaymentRequest request = new CreatePaymentRequest(
                 "m_api_test",
@@ -89,11 +90,33 @@ import static org.mockito.Mockito.when;
         assertThat(body.get("currency")).isEqualTo("INR");
         assertThat(body.get("providerReference")).isEqualTo("provider_txn_api_001");
         assertThat(body.get("paymentToken")).isNull(); // ensure token never returned
-        assertThat(body.get("correlationId")).isNotNull();
+        assertThat(body.get("correlationId")).isEqualTo(validCorrelationId);
 
-        // Verify correlation ID header echoed
+        // Verify correlation ID header echoed — response header and body must agree.
         String corrId = response.getHeaders().getFirst("X-Correlation-Id");
-        assertThat(corrId).isEqualTo("api-test-corr-001");
+        assertThat(corrId).isEqualTo(validCorrelationId);
+    }
+
+    @Test
+    void createPaymentWithMissingFieldsReturns400() throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        String invalidBody = """
+                {
+                    "currency": "INR"
+                }
+                """;
+
+        HttpEntity<String> entity = new HttpEntity<>(invalidBody, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                "/payments", entity, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+
+        Map<String, Object> body = objectMapper.readValue(response.getBody(), Map.class);
+        assertThat(body.get("error")).isEqualTo("VALIDATION_FAILED");
+        assertThat(body.get("details")).isNotNull();
     }
 
     @Test
@@ -121,25 +144,73 @@ import static org.mockito.Mockito.when;
     }
 
     @Test
-    void createPaymentWithMissingFieldsReturns400() throws Exception {
+    void createPaymentWithMalformedCorrelationIdGeneratesNewId() throws Exception {
+        // A malformed X-Correlation-Id (not a UUID) must be rejected and a new
+        // UUID generated. The response header and body must still agree.
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Correlation-Id", "not-a-uuid");
 
-        String invalidBody = """
+        String body = """
                 {
-                    "currency": "INR"
+                    "merchantId": "m_test",
+                    "customerRef": "c_test",
+                    "billRef": "INV-CORR-001",
+                    "amount": "100.00",
+                    "currency": "INR",
+                    "paymentMethod": "UPI",
+                    "paymentToken": "success:test"
                 }
                 """;
 
-        HttpEntity<String> entity = new HttpEntity<>(invalidBody, headers);
+        HttpEntity<String> entity = new HttpEntity<>(body, headers);
         ResponseEntity<String> response = restTemplate.postForEntity(
                 "/payments", entity, String.class);
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
-        Map<String, Object> body = objectMapper.readValue(response.getBody(), Map.class);
-        assertThat(body.get("error")).isEqualTo("VALIDATION_FAILED");
-        assertThat(body.get("details")).isNotNull();
+        Map<String, Object> respBody = objectMapper.readValue(response.getBody(), Map.class);
+        String headerCorrId = response.getHeaders().getFirst("X-Correlation-Id");
+        String bodyCorrId = (String) respBody.get("correlationId");
+
+        assertThat(headerCorrId).isNotNull().isNotEqualTo("not-a-uuid");
+        assertThat(bodyCorrId).isNotNull().isNotEqualTo("not-a-uuid");
+        // Header and body must agree.
+        assertThat(bodyCorrId).isEqualTo(headerCorrId);
+    }
+
+    @Test
+    void createPaymentWithoutCorrelationIdGeneratesOne() throws Exception {
+        // When no X-Correlation-Id is supplied, a new UUID is generated and
+        // echoed in both the response header and body.
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        String body = """
+                {
+                    "merchantId": "m_test",
+                    "customerRef": "c_test",
+                    "billRef": "INV-CORR-002",
+                    "amount": "100.00",
+                    "currency": "INR",
+                    "paymentMethod": "UPI",
+                    "paymentToken": "success:test"
+                }
+                """;
+
+        HttpEntity<String> entity = new HttpEntity<>(body, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                "/payments", entity, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+        Map<String, Object> respBody = objectMapper.readValue(response.getBody(), Map.class);
+        String headerCorrId = response.getHeaders().getFirst("X-Correlation-Id");
+        String bodyCorrId = (String) respBody.get("correlationId");
+
+        assertThat(headerCorrId).isNotNull();
+        assertThat(bodyCorrId).isNotNull();
+        assertThat(bodyCorrId).isEqualTo(headerCorrId);
     }
 
     @Test
@@ -177,12 +248,25 @@ import static org.mockito.Mockito.when;
 
     @Test
     void errorResponseContainsCorrelationId() throws Exception {
-        ResponseEntity<String> response = restTemplate.getForEntity(
-                "/payments/" + UUID.randomUUID(), String.class);
+        String validCorrelationId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-Correlation-Id", validCorrelationId);
+
+        HttpEntity<String> entity = new HttpEntity<>(null, headers);
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/payments/" + UUID.randomUUID(),
+                HttpMethod.GET, entity, String.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
 
         // Check response doesn't contain stack trace
-        String body = response.getBody();
-        assertThat(body).doesNotContain("at ").doesNotContain("Exception");
+        String respBody = response.getBody();
+        assertThat(respBody).doesNotContain("at ").doesNotContain("Exception");
+
+        // The correlation ID from the request must be echoed in the error body
+        // and the response header.
+        Map<String, Object> body = objectMapper.readValue(respBody, Map.class);
+        assertThat(body.get("correlationId")).isEqualTo(validCorrelationId);
+        assertThat(response.getHeaders().getFirst("X-Correlation-Id"))
+                .isEqualTo(validCorrelationId);
     }
 }

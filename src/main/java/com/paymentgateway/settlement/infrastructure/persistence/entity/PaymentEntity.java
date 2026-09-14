@@ -151,8 +151,28 @@ public class PaymentEntity {
     // --- Mapping: entity → domain ---
 
     public Payment toDomain(final String paymentToken) {
+        // amount_minor holds the integer minor-unit count (e.g. 125000 for
+        // 1250.00 INR). The column is DECIMAL(18,2) so PostgreSQL may store a
+        // trailing scale of 2, but the value must be an exact integer. Use
+        // longValueExact() so a fractional minor-unit value (e.g. 125000.50)
+        // fails loudly instead of silently truncating to 125000.
+        BigDecimal amountMinor = this.amount;
+        if (amountMinor == null) {
+            amountMinor = BigDecimal.ZERO;
+        }
+        if (amountMinor.scale() != 0) {
+            // Strip trailing zeros only when the value is an exact integer.
+            // Any non-zero fraction is a data-corruption signal and must throw.
+            BigDecimal stripped = amountMinor.stripTrailingZeros();
+            if (stripped.scale() > 0) {
+                throw new IllegalStateException(
+                        "amount_minor must be an integer minor-unit count, but was: " + amountMinor);
+            }
+            amountMinor = stripped;
+        }
+
         var money = Money.fromMinorUnits(
-                this.amount != null ? this.amount.longValue() : 0L,
+                amountMinor.longValueExact(),
                 Currency.fromCode(this.currency)
         );
 

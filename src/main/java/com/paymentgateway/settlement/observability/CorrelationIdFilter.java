@@ -51,6 +51,12 @@ public final class CorrelationIdFilter implements Filter {
             MDC.put("requestId", requestId);
             MDC.put("traceId", correlationId);
 
+            // Expose the resolved correlation ID as a request attribute so
+            // controllers can include the same value in response bodies,
+            // guaranteeing header/body consistency. Stored as a UUID object
+            // so downstream code can read it without re-parsing.
+            httpRequest.setAttribute("correlationId", UUID.fromString(correlationId));
+
             httpResponse.setHeader("X-Correlation-Id", correlationId);
 
             try {
@@ -69,7 +75,14 @@ public final class CorrelationIdFilter implements Filter {
         if (!StringUtils.hasText(value)) {
             return UUID.randomUUID().toString();
         }
-        return value;
+        try {
+            UUID.fromString(value);
+            return value;
+        } catch (IllegalArgumentException e) {
+            // Malformed header — generate a new UUID consistent with the
+            // policy used by PaymentController and the exception handler.
+            return UUID.randomUUID().toString();
+        }
     }
 
     @Override

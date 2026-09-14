@@ -12,13 +12,25 @@ package com.paymentgateway.settlement.domain.payment;
  *   CREATED        → PROCESSING
  *   PROCESSING     → SUCCEEDED | FAILED | UNKNOWN | REQUIRES_RECONCILIATION
  *   UNKNOWN        → SUCCEEDED | FAILED
+ *   REQUIRES_RECONCILIATION → SUCCEEDED | FAILED
  * </pre>
+ *
+ * <p><strong>Why {@code REQUIRES_RECONCILIATION} has exit transitions:</strong>
+ * A payment that reached this state was submitted to the provider but the
+ * gateway never received a definitive response (timeout with a bank
+ * discrepancy). The payment is not terminal — it must be resolved by a
+ * reconciliation/polling job that confirms the actual outcome with the
+ * provider. The exit transitions are the same safe administrative actions
+ * used to resolve {@code UNKNOWN}: confirm success or confirm failure.
+ * No new money moves; the ledger is not re-posted.</p>
  *
  * <p><strong>Invalid transitions (rejected):</strong></p>
  * <ul>
  *   <li>Any → CREATED (can't go back)</li>
  *   <li>SUCCEEDED → * (terminal — no outgoing)</li>
  *   <li>FAILED → * (terminal — no outgoing)</li>
+ *   <li>VOIDED → * (terminal — no outgoing, Stage 4+)</li>
+ *   <li>REFUNDED → * (terminal — no outgoing, Stage 4+)</li>
  *   <li>PROCESSING → CREATED</li>
  *   <li>PROCESSING → PROCESSING (no self-loop)</li>
  * </ul>
@@ -68,7 +80,8 @@ public final class PaymentStateEngine {
                     || target == PaymentStatus.REQUIRES_RECONCILIATION;
             case UNKNOWN -> target == PaymentStatus.SUCCEEDED
                     || target == PaymentStatus.FAILED;
-            case REQUIRES_RECONCILIATION -> false; // Resolved only by reconciliation stage
+            case REQUIRES_RECONCILIATION -> target == PaymentStatus.SUCCEEDED
+                    || target == PaymentStatus.FAILED;
             case SUCCEEDED, FAILED, VOIDED, REFUNDED -> false;
         };
 

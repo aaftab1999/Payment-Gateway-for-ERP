@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.paymentgateway.settlement.ApplicationContextTest
--------------------------------------------------------------------------------
-Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 9.014 s -- in com.paymentgateway.settlement.ApplicationContextTest

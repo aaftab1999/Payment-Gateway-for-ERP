@@ -148,7 +148,7 @@ class PaymentTest {
         payment.applyProviderResult(ProviderResult.unknown("TIMEOUT", "timeout"));
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.UNKNOWN);
 
-        payment.resolveUnknown(PaymentStatus.SUCCEEDED, null, null, "txn_resolved_123");
+        payment.resolveReconciliation(PaymentStatus.SUCCEEDED, null, null, "txn_resolved_123");
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.SUCCEEDED);
         assertThat(payment.getProviderReference()).isEqualTo("txn_resolved_123");
     }
@@ -159,7 +159,7 @@ class PaymentTest {
         payment.markProcessing();
         payment.applyProviderResult(ProviderResult.unknown("TIMEOUT", "timeout"));
 
-        payment.resolveUnknown(PaymentStatus.FAILED, "CONFIRMED_FAIL", "Bank reported failure", null);
+        payment.resolveReconciliation(PaymentStatus.FAILED, "CONFIRMED_FAIL", "Bank reported failure", null);
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.FAILED);
     }
 
@@ -169,7 +169,7 @@ class PaymentTest {
         payment.markProcessing();
         payment.applyProviderResult(ProviderResult.success("txn_123"));
 
-        assertThatThrownBy(() -> payment.resolveUnknown(PaymentStatus.FAILED, null, null, null))
+        assertThatThrownBy(() -> payment.resolveReconciliation(PaymentStatus.FAILED, null, null, null))
                 .isInstanceOf(IllegalStateTransitionException.class);
     }
 
