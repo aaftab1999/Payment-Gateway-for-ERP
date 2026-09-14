@@ -53,6 +53,23 @@ public final class Payment {
     private long version;
     private UUID journalEntryId;   // null until ledger posted (Stage 4+)
 
+    // --- Stage 4: idempotency, provider idempotency, retry metadata ---
+
+    /** Stable key sent to the external provider for this attempt. */
+    private String providerIdempotencyKey;
+
+    /** Number of provider attempts made for this payment. */
+    private int attemptCount;
+
+    /** Timestamp of the most recent provider attempt. */
+    private Instant lastAttemptAt;
+
+    /** Timestamp when the next recovery attempt is permitted. */
+    private Instant nextRetryAt;
+
+    /** Reason recorded on the most recent failure/uncertainty. */
+    private String lastFailureReason;
+
     // --- Construction ---
 
     private Payment(
@@ -79,6 +96,11 @@ public final class Payment {
         this.updatedAt = this.createdAt;
         this.version = 0;
         this.journalEntryId = null;
+        this.providerIdempotencyKey = null;
+        this.attemptCount = 0;
+        this.lastAttemptAt = null;
+        this.nextRetryAt = null;
+        this.lastFailureReason = null;
     }
 
     /**
@@ -116,8 +138,25 @@ public final class Payment {
     /**
      * Transition from PROCESSING → terminal/intermediate state based
      * on the provider result.
+     *
+     * <p><strong>Idempotent:</strong> If the payment has already reached a
+     * terminal state and the same provider result is applied again (e.g.
+     * duplicate callback or retry), the call is a no-op. This prevents
+     * duplicate provider results from corrupting state or re-posting the
+     * ledger. The provider reference and failure fields are only updated
+     * when the caller supplies a non-null value.</p>
      */
     public void applyProviderResult(final ProviderResult result) {
+        if (this.status.isTerminal()) {
+            // Duplicate provider result for an already-terminal payment.
+            // Update provider reference only if it was not previously set
+            // (some providers supply a ref only on the first response).
+            if (this.providerReference == null && result.providerReference() != null) {
+                this.providerReference = result.providerReference();
+            }
+            return;
+        }
+
         PaymentStatus target = mapResultToStatus(result.type());
         PaymentStateEngine.TransitionReason reason = mapResultToReason(result.type());
 
@@ -137,6 +176,63 @@ public final class Payment {
     }
 
     /**
+     * Records a provider attempt and its outcome.
+     *
+     * <p><strong>Provider idempotency:</strong> The {@code providerIdempotencyKey}
+     * must remain stable across retries of the same attempt. This method
+     * sets it only when it has not already been set, so a retry never
+     * generates a new provider key and the provider never charges the same
+     * logical attempt twice.</p>
+     *
+     * @param providerIdempotencyKey stable key for this attempt (must not be blank)
+     * @param result                 the provider result for this attempt
+     * @param failureReason          reason to record when the attempt was uncertain/failed
+     */
+    public void recordProviderAttempt(
+            final String providerIdempotencyKey,
+            final ProviderResult result,
+            final String failureReason) {
+        if (providerIdempotencyKey == null || providerIdempotencyKey.isBlank()) {
+            throw new IllegalArgumentException("providerIdempotencyKey must not be blank");
+        }
+        if (this.providerIdempotencyKey == null) {
+            this.providerIdempotencyKey = providerIdempotencyKey;
+        }
+        this.attemptCount = this.attemptCount + 1;
+        this.lastAttemptAt = Instant.now();
+        if (failureReason != null && !failureReason.isBlank()) {
+            this.lastFailureReason = failureReason;
+        }
+        touch();
+    }
+
+    /**
+     * Ensures a stable provider idempotency key exists for this payment.
+     *
+     * <p>The key is derived deterministically from the payment ID so it
+     * survives application restarts and is stable across retries of the
+     * same attempt. The first call sets it; subsequent calls are no-ops.</p>
+     *
+     * @return the provider idempotency key (never null for a persisted payment)
+     */
+    public String ensureProviderIdempotencyKey() {
+        if (this.providerIdempotencyKey == null || this.providerIdempotencyKey.isBlank()) {
+            this.providerIdempotencyKey = "prov_" + this.paymentId.toString();
+        }
+        return this.providerIdempotencyKey;
+    }
+
+    /**
+     * Schedules the next permitted retry.
+     *
+     * @param nextRetryAt when the recovery worker may attempt again
+     */
+    public void scheduleNextRetry(final Instant nextRetryAt) {
+        this.nextRetryAt = nextRetryAt;
+        touch();
+    }
+
+/**
      * Resolve an UNKNOWN or REQUIRES_RECONCILIATION payment to a confirmed
      * state. Called by the reconciliation/polling job (Stage 4).
      *
@@ -147,9 +243,9 @@ public final class Payment {
      * are updated only when the caller supplies a non-null value.</p>
      */
     public void resolveReconciliation(final PaymentStatus resolved,
-                                      final String failureCode,
-                                      final String failureReason,
-                                      final String providerReference) {
+                                       final String failureCode,
+                                       final String failureReason,
+                                       final String providerReference) {
         this.status = PaymentStateEngine.transition(
                 this.status, resolved,
                 resolved == PaymentStatus.SUCCEEDED
@@ -159,6 +255,37 @@ public final class Payment {
         if (providerReference != null) this.providerReference = providerReference;
         if (failureCode != null) this.failureCode = failureCode;
         if (failureReason != null) this.failureReason = failureReason;
+        touch();
+    }
+
+    /**
+     * Re-enters PROCESSING for a bounded retry of an uncertain payment.
+     *
+     * <p>Only legal from {@link PaymentStatus#UNKNOWN} or
+     * {@link PaymentStatus#REQUIRES_RECONCILIATION}. The caller MUST ensure
+     * the retry budget has not been exhausted before invoking this method;
+     * the state machine only validates the transition shape.</p>
+     */
+    public void markRetrySubmitted() {
+        this.status = PaymentStateEngine.transition(
+                this.status, PaymentStatus.PROCESSING,
+                PaymentStateEngine.TransitionReason.RETRY_SUBMITTED);
+        touch();
+    }
+
+    /**
+     * Records that the retry budget for this payment has been exhausted.
+     *
+     * <p>The payment is left in its current non-terminal state
+     * ({@link PaymentStatus#UNKNOWN} or
+     * {@link PaymentStatus#REQUIRES_RECONCILIATION}) so it remains visible
+     * for manual investigation or a later reconciliation pass. This method
+     * does NOT change status — it only records the exhaustion reason.</p>
+     */
+    public void markRetryExhausted(final String reason) {
+        if (reason != null && !reason.isBlank()) {
+            this.lastFailureReason = reason;
+        }
         touch();
     }
 
@@ -222,6 +349,11 @@ public final class Payment {
     public UUID getCorrelationId() { return correlationId; }
     public long getVersion() { return version; }
     public UUID getJournalEntryId() { return journalEntryId; }
+    public String getProviderIdempotencyKey() { return providerIdempotencyKey; }
+    public int getAttemptCount() { return attemptCount; }
+    public Instant getLastAttemptAt() { return lastAttemptAt; }
+    public Instant getNextRetryAt() { return nextRetryAt; }
+    public String getLastFailureReason() { return lastFailureReason; }
 
     public void setJournalEntryId(final UUID journalEntryId) {
         this.journalEntryId = journalEntryId;
@@ -255,7 +387,12 @@ public final class Payment {
             final Instant updatedAt,
             final UUID correlationId,
             final long version,
-            final UUID journalEntryId) {
+            final UUID journalEntryId,
+            final String providerIdempotencyKey,
+            final int attemptCount,
+            final Instant lastAttemptAt,
+            final Instant nextRetryAt,
+            final String lastFailureReason) {
 
         Payment payment = new Payment(paymentId, merchantId, customerRef, billRef,
                 amount, paymentMethod, paymentToken, correlationId);
@@ -268,6 +405,11 @@ public final class Payment {
         payment.updatedAt = updatedAt;
         payment.version = version;
         payment.journalEntryId = journalEntryId;
+        payment.providerIdempotencyKey = providerIdempotencyKey;
+        payment.attemptCount = attemptCount;
+        payment.lastAttemptAt = lastAttemptAt;
+        payment.nextRetryAt = nextRetryAt;
+        payment.lastFailureReason = lastFailureReason;
 
         return payment;
     }

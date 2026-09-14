@@ -22,16 +22,21 @@ import java.util.UUID;
  *
  * <p><strong>How a real provider could be added:</strong> Create a new
  * class implementing this interface (e.g. {@code StripePaymentProcessor})
- * and register it as a Spring bean keyed by {@link com.paymentgateway.settlement.domain.payment.PaymentMethodType}.
+ * and register it as a Spring bean keyed by
+ * {@link com.paymentgateway.settlement.domain.payment.PaymentMethodType}.
  * The ChargeService already selects the processor by method type —
  * no workflow changes needed.</p>
  *
- * @param paymentToken  the tokenized/simulated payment credential
- * @param amountMinor   amount in minor units (paise/cents)
- * @param currency      ISO 4217 currency code
- * @param correlationId trace ID for the provider call
+ * @param paymentToken           the tokenized/simulated payment credential
+ * @param amountMinor            amount in minor units (paise/cents)
+ * @param currency               ISO 4217 currency code
+ * @param correlationId          trace ID for the provider call
+ * @param providerIdempotencyKey stable key for this payment attempt; the
+ *                               provider must deduplicate calls carrying the
+ *                               same key so a retry never double-charges
  * @return the result from the provider
  */
 public interface PaymentProcessor {
-    ProviderResult process(String paymentToken, long amountMinor, String currency, UUID correlationId);
+    ProviderResult process(String paymentToken, long amountMinor, String currency,
+                           UUID correlationId, String providerIdempotencyKey);
 }

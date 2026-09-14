@@ -7,13 +7,21 @@ package com.paymentgateway.settlement.domain.payment;
  * aggregate delegates to this engine, making the state machine fully unit-testable
  * without Spring or persistence.</p>
  *
- * <p><strong>Valid transitions (Stage 3):</strong></p>
+ * <p><strong>Valid transitions (Stage 4):</strong></p>
  * <pre>
  *   CREATED        → PROCESSING
  *   PROCESSING     → SUCCEEDED | FAILED | UNKNOWN | REQUIRES_RECONCILIATION
- *   UNKNOWN        → SUCCEEDED | FAILED
- *   REQUIRES_RECONCILIATION → SUCCEEDED | FAILED
+ *   UNKNOWN        → SUCCEEDED | FAILED | PROCESSING  (retry)
+ *   REQUIRES_RECONCILIATION → SUCCEEDED | FAILED | PROCESSING  (retry)
  * </pre>
+ *
+ * <p><strong>Why UNKNOWN/REQUIRES_RECONCILIATION can return to PROCESSING:</strong>
+ * A bounded retry of an uncertain payment is safe <em>only</em> when the
+ * provider idempotency key is reused. The recovery worker re-enters
+ * PROCESSING, re-submits with the same provider key, and either lands in a
+ * terminal state or exhausts its retry budget and leaves the payment in a
+ * clearly-documented recoverable state. This is NOT an uncontrolled loop —
+ * the retry budget is enforced by the application, not the state machine.</p>
  *
  * <p><strong>Why {@code REQUIRES_RECONCILIATION} has exit transitions:</strong>
  * A payment that reached this state was submitted to the provider but the
@@ -79,9 +87,11 @@ public final class PaymentStateEngine {
                     || target == PaymentStatus.UNKNOWN
                     || target == PaymentStatus.REQUIRES_RECONCILIATION;
             case UNKNOWN -> target == PaymentStatus.SUCCEEDED
-                    || target == PaymentStatus.FAILED;
+                    || target == PaymentStatus.FAILED
+                    || target == PaymentStatus.PROCESSING;   // retry: UNKNOWN → PROCESSING
             case REQUIRES_RECONCILIATION -> target == PaymentStatus.SUCCEEDED
-                    || target == PaymentStatus.FAILED;
+                    || target == PaymentStatus.FAILED
+                    || target == PaymentStatus.PROCESSING;   // retry: REQUIRES_RECONCILIATION → PROCESSING
             case SUCCEEDED, FAILED, VOIDED, REFUNDED -> false;
         };
 
@@ -103,6 +113,10 @@ public final class PaymentStateEngine {
         PROVIDER_TIMEOUT,
         PROVIDER_UNKNOWN_OUTCOME,
         RECONCILIATION_MATCHED,
-        RECONCILIATION_FAILED
+        RECONCILIATION_FAILED,
+        /** Bounded retry: an uncertain payment was re-submitted to the provider. */
+        RETRY_SUBMITTED,
+        /** Bounded retry exhausted: the payment remains in a recoverable state. */
+        RETRY_EXHAUSTED
     }
 }

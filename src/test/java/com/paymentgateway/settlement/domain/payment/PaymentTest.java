@@ -130,15 +130,15 @@ class PaymentTest {
     }
 
     @Test
-    void doubleApplyToTerminalFails() {
+    void doubleApplyToTerminalIsIdempotent() {
         Payment payment = createTestPayment();
         payment.markProcessing();
         payment.applyProviderResult(ProviderResult.success("txn_123"));
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.SUCCEEDED);
 
-        // Cannot apply another result to SUCCEEDED
-        assertThatThrownBy(() -> payment.applyProviderResult(ProviderResult.declined("DECLINE", "too late")))
-                .isInstanceOf(IllegalStateTransitionException.class);
+        // Double apply to terminal state is idempotent — no exception.
+        payment.applyProviderResult(ProviderResult.declined("DECLINE", "too late"));
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.SUCCEEDED);
     }
 
     @Test

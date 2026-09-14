@@ -1,5 +1,12 @@
 package com.paymentgateway.settlement.common;
 
+import com.paymentgateway.settlement.api.dto.ApiError;
+import com.paymentgateway.settlement.api.dto.ValidationError;
+import com.paymentgateway.settlement.domain.idempotency.IdempotencyKeyConflictException;
+import com.paymentgateway.settlement.domain.payment.IllegalStateTransitionException;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -13,10 +20,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
-
-import com.paymentgateway.settlement.api.dto.ApiError;
-import com.paymentgateway.settlement.api.dto.ValidationError;
-import com.paymentgateway.settlement.domain.payment.IllegalStateTransitionException;
 
 /**
  * Global exception handler — translates domain/infrastructure exceptions
@@ -35,6 +38,8 @@ import com.paymentgateway.settlement.domain.payment.IllegalStateTransitionExcept
  */
 @RestControllerAdvice
 public class PaymentGatewayExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(PaymentGatewayExceptionHandler.class);
 
     private static final DateTimeFormatter TS_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssZ").withZone(ZoneOffset.UTC);
@@ -130,6 +135,62 @@ public class PaymentGatewayExceptionHandler {
                         HttpStatus.CONFLICT.value(),
                         "ILLEGAL_STATE_TRANSITION",
                         ex.getMessage(),
+                        request.getRequestURI(),
+                        null,
+                        correlationId
+                ));
+    }
+
+    /**
+     * Handles idempotency key conflicts: the same key was reused with a
+     * different request payload.
+     *
+     * <p><strong>Why 409 CONFLICT:</strong> The caller did nothing wrong in
+     * isolation — the conflict is with a *prior concurrent* request. 409
+     * lets the caller distinguish "fix your payload" from "retry later /
+     * use the original key".</p>
+     */
+    @ExceptionHandler(IdempotencyKeyConflictException.class)
+    public ResponseEntity<ApiError> handleIdempotencyConflict(
+            final IdempotencyKeyConflictException ex, final HttpServletRequest request) {
+        String correlationId = resolveCorrelationId(request);
+
+        log.warn("Idempotency conflict: key={}, existingPaymentId={}, correlationId={}",
+                ex.getIdempotencyKey(), ex.getExistingPaymentId(), correlationId);
+
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ApiError(
+                        Instant.now().getEpochSecond(),
+                        HttpStatus.CONFLICT.value(),
+                        "IDEMPOTENCY_KEY_CONFLICT",
+                        ex.getMessage(),
+                        request.getRequestURI(),
+                        null,
+                        correlationId
+                ));
+    }
+
+    /**
+     * Handles optimistic-locking failures during state transitions.
+     *
+     * <p><strong>Why 409 CONFLICT:</strong> The state transition could not
+     * complete because another worker modified the row first. The caller
+     * should retry the request (the idempotency key makes this safe).</p>
+     */
+    @ExceptionHandler(org.springframework.orm.ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiError> handleOptimisticLock(
+            final org.springframework.orm.ObjectOptimisticLockingFailureException ex,
+            final HttpServletRequest request) {
+        String correlationId = resolveCorrelationId(request);
+
+        log.warn("Optimistic locking conflict: correlationId={}", correlationId);
+
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ApiError(
+                        Instant.now().getEpochSecond(),
+                        HttpStatus.CONFLICT.value(),
+                        "OPTIMISTIC_LOCK_CONFLICT",
+                        "State transition conflict; please retry",
                         request.getRequestURI(),
                         null,
                         correlationId

@@ -91,6 +91,23 @@ public class PaymentEntity {
     @Column(name = "journal_entry_id", columnDefinition = "UUID")
     private UUID journalEntryId;
 
+    // --- Stage 4: idempotency, provider idempotency, retry metadata ---
+
+    @Column(name = "provider_idempotency_key", columnDefinition = "VARCHAR(255)")
+    private String providerIdempotencyKey;
+
+    @Column(name = "attempt_count", nullable = false)
+    private int attemptCount = 0;
+
+    @Column(name = "last_attempt_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant lastAttemptAt;
+
+    @Column(name = "next_retry_at", columnDefinition = "TIMESTAMPTZ")
+    private Instant nextRetryAt;
+
+    @Column(name = "last_failure_reason", columnDefinition = "VARCHAR(1024)")
+    private String lastFailureReason;
+
     @Column(name = "created_at", nullable = false, updatable = false, columnDefinition = "TIMESTAMPTZ")
     private Instant createdAt;
 
@@ -125,6 +142,11 @@ public class PaymentEntity {
         entity.failureReason = payment.getFailureReason();
         entity.correlationId = payment.getCorrelationId();
         entity.journalEntryId = payment.getJournalEntryId();
+        entity.providerIdempotencyKey = payment.getProviderIdempotencyKey();
+        entity.attemptCount = payment.getAttemptCount();
+        entity.lastAttemptAt = payment.getLastAttemptAt();
+        entity.nextRetryAt = payment.getNextRetryAt();
+        entity.lastFailureReason = payment.getLastFailureReason();
         entity.createdAt = payment.getCreatedAt();
         entity.updatedAt = payment.getUpdatedAt();
         return entity;
@@ -144,6 +166,11 @@ public class PaymentEntity {
         this.failureReason = payment.getFailureReason();
         this.correlationId = payment.getCorrelationId();
         this.journalEntryId = payment.getJournalEntryId();
+        this.providerIdempotencyKey = payment.getProviderIdempotencyKey();
+        this.attemptCount = payment.getAttemptCount();
+        this.lastAttemptAt = payment.getLastAttemptAt();
+        this.nextRetryAt = payment.getNextRetryAt();
+        this.lastFailureReason = payment.getLastFailureReason();
         this.createdAt = payment.getCreatedAt();
         this.updatedAt = payment.getUpdatedAt();
     }
@@ -192,7 +219,12 @@ public class PaymentEntity {
                 this.updatedAt,
                 this.correlationId,
                 this.version != null ? this.version : 0L,
-                this.journalEntryId
+                this.journalEntryId,
+                this.providerIdempotencyKey,
+                this.attemptCount,
+                this.lastAttemptAt,
+                this.nextRetryAt,
+                this.lastFailureReason
         );
     }
 
@@ -244,4 +276,19 @@ public class PaymentEntity {
     public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
 
     public Long getVersion() { return version; }
+
+    public String getProviderIdempotencyKey() { return providerIdempotencyKey; }
+    public void setProviderIdempotencyKey(String providerIdempotencyKey) { this.providerIdempotencyKey = providerIdempotencyKey; }
+
+    public int getAttemptCount() { return attemptCount; }
+    public void setAttemptCount(int attemptCount) { this.attemptCount = attemptCount; }
+
+    public Instant getLastAttemptAt() { return lastAttemptAt; }
+    public void setLastAttemptAt(Instant lastAttemptAt) { this.lastAttemptAt = lastAttemptAt; }
+
+    public Instant getNextRetryAt() { return nextRetryAt; }
+    public void setNextRetryAt(Instant nextRetryAt) { this.nextRetryAt = nextRetryAt; }
+
+    public String getLastFailureReason() { return lastFailureReason; }
+    public void setLastFailureReason(String lastFailureReason) { this.lastFailureReason = lastFailureReason; }
 }
