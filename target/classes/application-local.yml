@@ -1,0 +1,58 @@
+# ----------------------------------------------------------------------------
+# Local development configuration.
+# Run the containers first:  docker compose up -d
+# Then start the app:       ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+# ----------------------------------------------------------------------------
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:15432/pgs
+    username: pgs
+    password: pgs_secret
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    # In production migrations are managed by CI; local dev may auto-drop if needed.
+
+  redis:
+    host: localhost
+    port: 16379
+    timeout: 2000ms
+    lettuce:
+      pool:
+        max-active: 8
+        max-idle: 8
+        min-idle: 0
+
+  kafka:
+    bootstrap-servers: localhost:19092
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      enable-idempotence: true
+      transaction-id-prefix: pgw-settlement-
+    consumer:
+      group-id: pgw-settlement-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+      isolation-level: read_committed
+    listener:
+      concurrency: 3
+      ack-mode: manual
+
+app:
+  environment: local
+  correlation-id:
+    header-name: X-Correlation-Id

@@ -1,0 +1,42 @@
+# ----------------------------------------------------------------------------
+# Test configuration.
+#
+# This file provides safe defaults.  Integration tests that use
+# Testcontainers override these properties dynamically via
+# @DynamicPropertySource or @ServiceConnection.
+# ----------------------------------------------------------------------------
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:15432/pgs
+    driver-class-name: org.postgresql.Driver
+    username: pgs
+    password: pgs_secret
+    hikari:
+      maximum-pool-size: 2
+      minimum-idle: 1
+      # fail-fast so pure unit tests get a quick, clear error if DB is down
+      initialization-fail-timeout: 1
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  redis:
+    host: localhost
+    port: 16379
+    timeout: 1000ms
+
+  kafka:
+    bootstrap-servers: localhost:19092
+    producer:
+      acks: all
+      enable-idempotence: true
+    consumer:
+      group-id: pgw-test-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+
+app:
+  environment: test

@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.paymentgateway.settlement.integration.PostgresFlywayIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 7.459 s -- in com.paymentgateway.settlement.integration.PostgresFlywayIntegrationTest
