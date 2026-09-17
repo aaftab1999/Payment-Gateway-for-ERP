@@ -1,6 +1,8 @@
 package com.paymentgateway.settlement.infrastructure.persistence.entity;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -42,6 +44,7 @@ public class IdempotencyEntity {
     @Column(name = "response_status", nullable = false)
     private int responseStatus;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "response_body", nullable = false, columnDefinition = "JSONB")
     private String responseBody;
 

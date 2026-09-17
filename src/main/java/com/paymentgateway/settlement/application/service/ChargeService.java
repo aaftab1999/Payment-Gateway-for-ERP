@@ -3,6 +3,7 @@ package com.paymentgateway.settlement.application.service;
 import com.paymentgateway.settlement.application.port.IdempotencyOutcome;
 import com.paymentgateway.settlement.application.port.IdempotencyService;
 import com.paymentgateway.settlement.application.port.PaymentProcessor;
+import com.paymentgateway.settlement.domain.event.PaymentEventType;
 import com.paymentgateway.settlement.domain.idempotency.IdempotencyKey;
 import com.paymentgateway.settlement.domain.idempotency.IdempotencyKeyConflictException;
 import com.paymentgateway.settlement.domain.payment.Currency;
@@ -14,16 +15,21 @@ import com.paymentgateway.settlement.domain.payment.PaymentStatus;
 import com.paymentgateway.settlement.domain.payment.ProviderResult;
 import com.paymentgateway.settlement.infrastructure.persistence.entity.PaymentEntity;
 import com.paymentgateway.settlement.infrastructure.persistence.repository.PaymentRepository;
+import com.paymentgateway.settlement.infrastructure.persistence.entity.OutboxEventEntity;
+import com.paymentgateway.settlement.application.service.OutboxEventService;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import jakarta.persistence.EntityNotFoundException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -70,14 +76,20 @@ public class ChargeService {
     private final PaymentRepository paymentRepository;
     private final PaymentProcessor processor;
     private final IdempotencyService idempotencyService;
+    private final OutboxEventService outboxEventService;
+    private final TransactionTemplate transactionTemplate;
 
     public ChargeService(
             final PaymentRepository paymentRepository,
             final PaymentProcessor processor,
-            final IdempotencyService idempotencyService) {
+            final IdempotencyService idempotencyService,
+            final OutboxEventService outboxEventService,
+            final PlatformTransactionManager transactionManager) {
         this.paymentRepository = paymentRepository;
         this.processor = processor;
         this.idempotencyService = idempotencyService;
+        this.outboxEventService = outboxEventService;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     /**
@@ -91,8 +103,7 @@ public class ChargeService {
      * any transaction. TX2 applies the result and finalizes the idempotency
      * record.
      */
-    @Transactional
-    public Payment charge(
+    public ChargeResult chargeWithOutcome(
             final String merchantId,
             final String customerRef,
             final String billRef,
@@ -103,7 +114,6 @@ public class ChargeService {
             final UUID correlationId,
             final String idempotencyKey) {
 
-        // --- Validate ---
         PaymentMethodType method = PaymentMethodType.fromCode(paymentMethodStr);
         Currency currency = Currency.fromCode(currencyCode);
 
@@ -115,59 +125,69 @@ public class ChargeService {
         IdempotencyKey key = IdempotencyKey.of(idempotencyKey);
         String fingerprint = requestFingerprint(merchantId, customerRef, billRef,
                 amountStr, currencyCode, paymentMethodStr, paymentToken);
+        PaymentId typedPaymentId = PaymentId.generate();
+        UUID paymentId = typedPaymentId.toUuid();
+
+        Optional<IdempotencyOutcome.ReplayOutcome> existing = idempotencyService.replay(
+                merchantId, key);
+        if (existing.isPresent()) {
+            UUID replayPaymentId = UUID.fromString(existing.get().paymentId());
+            Payment replayedPayment = paymentRepository.findByPaymentId(replayPaymentId)
+                    .map(entity -> entity.toDomain(null))
+                    .orElseThrow(() -> new EntityNotFoundException(
+                            "Payment not found: " + replayPaymentId));
+            return new ChargeResult(replayedPayment, true, existing.get().responseStatus());
+        }
 
         log.info("Creating payment: merchant={}, billRef={}, amount={}, method={}",
                 merchantId, billRef, amount, method);
 
-        // --- TX1: Create payment (CREATED) + reserve idempotency ---
-        PaymentId paymentId = PaymentId.generate();
-        Payment payment = Payment.create(
-                paymentId, merchantId, customerRef, billRef,
-                amount, method, paymentToken, correlationId
-        );
-
-        // Ensure provider idempotency key is stable before the provider call.
-        payment.ensureProviderIdempotencyKey();
-
-        PaymentEntity entity = PaymentEntity.fromDomain(payment);
-        paymentRepository.save(entity);
-        // Payment is now durable. TX1 commits here (transactional method boundary)
-        log.info("Payment persisted in CREATED state: {}", paymentId);
-
-        // Reserve the idempotency key. This must happen AFTER the payment
-        // exists so the payment_id foreign key is satisfied. If the key
-        // already exists, the unique constraint fires and we roll back.
+        Payment payment;
         try {
-            IdempotencyOutcome outcome = idempotencyService.reserve(
-                    merchantId, key, fingerprint, paymentId.toUuid());
-            if (outcome instanceof IdempotencyOutcome.ReplayOutcome replay) {
-                // Should not happen in this flow because reserve() would have
-                // thrown a unique violation first. Handle defensively.
-                throw new IllegalStateException("Unexpected replay during reservation");
-            }
-            if (outcome instanceof IdempotencyOutcome.ConflictOutcome conflict) {
-                throw new IdempotencyKeyConflictException(
-                        "Idempotency key reused with different request payload",
-                        key.value(), conflict.existingPaymentId());
-            }
-        } catch (RuntimeException e) {
-            // Check if this is a unique constraint violation (SQL state 23505).
-            String msg = e.getMessage();
-            if (msg != null && (msg.contains("23505") || msg.contains("unique"))) {
-                // Another request reserved this key first. Roll back the payment
-                // and let the caller resolve via replay/conflict.
-                throw new IdempotencyKeyConflictException(
-                        "Idempotency key already in use", key.value(), null);
-            }
-            throw e;
+            payment = transactionTemplate.execute(status -> {
+                Payment created = Payment.create(
+                        typedPaymentId, merchantId, customerRef, billRef,
+                        amount, method, paymentToken, correlationId
+                );
+                created.ensureProviderIdempotencyKey();
+
+                PaymentEntity entity = PaymentEntity.fromDomain(created);
+                paymentRepository.saveAndFlush(entity);
+                OutboxEventEntity createdEvent = outboxEventService.append(
+                        created,
+                        PaymentEventType.PAYMENT_CREATED,
+                        null,
+                        "PAYMENT_CREATED",
+                        null,
+                        null,
+                        null
+                );
+                log.info("Payment outbox event created: paymentId={}, eventId={}, eventType={}",
+                        paymentId, createdEvent.getEventId(), PaymentEventType.PAYMENT_CREATED.wireValue());
+                log.info("Payment persisted in CREATED state: {}", paymentId);
+
+                IdempotencyOutcome outcome = idempotencyService.reserve(
+                        merchantId, key, fingerprint, paymentId);
+                if (outcome instanceof IdempotencyOutcome.ReplayOutcome replay) {
+                    throw new ReplayDuringReservationException(replay);
+                }
+                if (outcome instanceof IdempotencyOutcome.ConflictOutcome conflict) {
+                    throw new IdempotencyKeyConflictException(
+                            "Idempotency key reused with different request payload",
+                            key.value(), conflict.existingPaymentId());
+                }
+                return created;
+            });
+        } catch (ReplayDuringReservationException replay) {
+            UUID replayPaymentId = UUID.fromString(replay.outcome.paymentId());
+            Payment replayedPayment = paymentRepository.findByPaymentId(replayPaymentId)
+                    .map(entity -> entity.toDomain(null))
+                    .orElseThrow(() -> new EntityNotFoundException(
+                            "Payment not found: " + replayPaymentId));
+            return new ChargeResult(replayedPayment, true, replay.outcome.responseStatus());
         }
 
-        // --- Provider call: OUTSIDE transaction ---
-        // No DB locks are held during this HTTP round-trip.
-        // If the app crashes here, the payment is in CREATED state
-        // and a background job can reconcile (Stage 4+).
         log.info("Calling provider for payment: {}", paymentId);
-
         ProviderResult providerResult;
         try {
             providerResult = processor.process(
@@ -185,17 +205,34 @@ public class ChargeService {
             );
         }
 
-        // --- TX2: Apply result (re-acquire lock, transition, commit) ---
-        Payment updated = applyProviderResult(paymentId.toUuid(), providerResult, key);
+        final ProviderResult providerCallResult = providerResult;
 
-        // --- Finalize idempotency record with the real response ---
-        boolean isTerminal = updated.getStatus().isTerminal();
-        String responseBody = buildResponseJson(updated, correlationId);
-        idempotencyService.finalize(
-                merchantId, key, fingerprint,
-                paymentId.toUuid(), statusCodeFor(updated.getStatus()), responseBody, isTerminal);
+        Payment updated = transactionTemplate.execute(status -> {
+            Payment result = applyProviderResult(paymentId, providerCallResult, key);
+            boolean isTerminal = result.getStatus().isTerminal();
+            String responseBody = buildResponseJson(result, correlationId);
+            idempotencyService.finalize(
+                    merchantId, key, fingerprint,
+                    paymentId, statusCodeFor(result.getStatus()), responseBody, isTerminal);
+            return result;
+        });
 
-        return updated;
+        return new ChargeResult(updated, false);
+    }
+
+    public Payment charge(
+            final String merchantId,
+            final String customerRef,
+            final String billRef,
+            final String amountStr,
+            final String currencyCode,
+            final String paymentMethodStr,
+            final String paymentToken,
+            final UUID correlationId,
+            final String idempotencyKey) {
+        return chargeWithOutcome(merchantId, customerRef, billRef, amountStr, currencyCode,
+                paymentMethodStr, paymentToken, correlationId, idempotencyKey,
+                UUID.randomUUID()).payment();
     }
 
     /**
@@ -209,7 +246,6 @@ public class ChargeService {
      * a terminal state, the call is a no-op. This prevents duplicate
      * provider results from corrupting state or re-posting the ledger.</p>
      */
-    @Transactional
     protected Payment applyProviderResult(
             final UUID paymentId,
             final ProviderResult providerResult,
@@ -231,9 +267,46 @@ public class ChargeService {
                     return payment;
                 }
 
-                // State machine: CREATED → PROCESSING → terminal
+                PaymentStatus statusBeforeProcessing = payment.getStatus();
                 payment.markProcessing();
+                UUID processingCausationId = outboxEventService
+                        .findFirstEventId(paymentId, PaymentEventType.PAYMENT_CREATED)
+                        .orElse(null);
+                OutboxEventEntity processingEvent = outboxEventService.append(
+                        payment,
+                        PaymentEventType.PAYMENT_PROCESSING_STARTED,
+                        statusBeforeProcessing,
+                        "SUBMITTED_TO_PROVIDER",
+                        processingCausationId,
+                        null,
+                        null
+                );
+                log.info("Payment outbox event created: paymentId={}, eventId={}, eventType={}",
+                        paymentId, processingEvent.getEventId(),
+                        PaymentEventType.PAYMENT_PROCESSING_STARTED.wireValue());
+
+                PaymentStatus statusBeforeResult = payment.getStatus();
                 payment.applyProviderResult(providerResult);
+                if (payment.getStatus() != statusBeforeResult) {
+                    PaymentEventType eventType = PaymentEventType.forStatus(payment.getStatus());
+                    String reason = switch (providerResult.type()) {
+                        case SUCCESS -> "PROVIDER_SUCCESS";
+                        case DECLINED -> "PROVIDER_DECLINED";
+                        case TECHNICAL_FAILURE -> "PROVIDER_TECHNICAL_FAILURE";
+                        case UNKNOWN -> "PROVIDER_UNKNOWN_OUTCOME";
+                    };
+                    OutboxEventEntity resultEvent = outboxEventService.append(
+                            payment,
+                            eventType,
+                            statusBeforeResult,
+                            reason,
+                            processingEvent.getEventId(),
+                            null,
+                            null
+                    );
+                    log.info("Payment outbox event created: paymentId={}, eventId={}, eventType={}",
+                            paymentId, resultEvent.getEventId(), eventType.wireValue());
+                }
 
                 // Persist updated state on the already-managed entity
                 entity.updateFromDomain(payment);

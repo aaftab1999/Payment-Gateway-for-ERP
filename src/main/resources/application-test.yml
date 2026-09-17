@@ -40,3 +40,5 @@ spring:
 
 app:
   environment: test
+  outbox:
+    enabled: false

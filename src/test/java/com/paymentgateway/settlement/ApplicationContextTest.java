@@ -22,7 +22,8 @@ import org.springframework.test.context.ActiveProfiles;
                         "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration," +
                 "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration," +
                 "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration," +
-                "org.flywaydb.core.api.configuration.FlywayConfigurationAutoConfiguration"
+                "org.flywaydb.core.api.configuration.FlywayConfigurationAutoConfiguration",
+                "app.outbox.enabled=false"
         }
 )
 @ActiveProfiles("test")
@@ -41,6 +42,9 @@ class ApplicationContextTest {
 
     @MockBean
     private com.paymentgateway.settlement.infrastructure.persistence.repository.PaymentRepository paymentRepository;
+
+    @MockBean
+    private com.paymentgateway.settlement.application.service.OutboxEventService outboxEventService;
 
     @MockBean
     private com.paymentgateway.settlement.application.port.PaymentProcessor processor;

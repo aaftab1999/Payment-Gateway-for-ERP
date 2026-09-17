@@ -25,6 +25,7 @@ Creates a payment, submits it to the simulated provider, and applies the result 
 | `Content-Type` | Yes | `application/json` |
 | `X-Correlation-Id` | No | Client-provided UUID for tracing. If missing or invalid, a UUID is generated. |
 | `X-Base-Url` | No | Base URL for HATEOAS links (defaults to `/api/v1`). |
+| `Idempotency-Key` | Yes | Stable command key. Reusing it with the same request replays the original result with HTTP 200; reusing it with a different request returns HTTP 409. |
 
 #### Request Body
 
@@ -77,7 +78,11 @@ Creates a payment, submits it to the simulated provider, and applies the result 
 }
 ```
 
-Fields are omitted (`@JsonInclude(NON_NULL)`) when null.
+Fields are omitted (`@JsonInclude(NON_NULL)`) when null. `billRef` is the ERP invoice/reference used to correlate lifecycle events. The gateway emits versioned events asynchronously; see [Stage 5 Outbox, Kafka, and ERP Contract](stage-5-outbox-kafka-erp.md).
+
+### Idempotent replay contract
+
+A retry with the same merchant-scoped `Idempotency-Key` and request fingerprint must return the original payment response without calling the provider again. The original HTTP status is retained (`201` for a new payment, `200` for a completed replay, or `202` for an accepted asynchronous/unknown outcome). A different payload for a non-terminal in-flight request returns `409`. The replay path and concurrent-reservation behavior are tracked in the Stage 5 handoff because their current code contract is not yet fully aligned.
 
 #### Response: 400 Bad Request (Validation)
 

@@ -1,10 +1,28 @@
 # Payment Gateway & Settlement Core Engine — Architecture & Design
 
-> Status: **Stage 1 — Architecture & Design only. No implementation code.**
+> Status: **Stage 5 handoff — payment core, idempotency, transactional outbox/Kafka scaffold, and ERP event contract are documented; replay wiring and integration verification remain pending. Stage 6 reconciliation is next.**
 
 ## 0. Repository findings
 
-`/home/gt/git/GT/ERP_paymentGateway` is **empty and not a git repository**. No existing source, dependencies, or configuration. This is a **new project** (greenfield). A `docs/` directory was created for this document.
+The repository is a Spring Boot 3.3.3 / Java 21 monolith with PostgreSQL, Flyway, Spring Data JPA, Redis support, Spring Kafka, Micrometer, and Testcontainers. Flyway migrations create the payment, idempotency, and transactional outbox schemas. The Stage 5 implementation is the source of truth for event publication; the external ERP remains out of scope.
+
+### 0.1 Current handoff
+
+Implemented in the current worktree:
+
+- payment API/orchestration and state machine;
+- PostgreSQL idempotency authority and provider idempotency metadata;
+- transactional outbox schema/service/publisher, Kafka topic and producer configuration, retry/backoff, lease recovery, and DLQ behavior;
+- versioned payment event envelope and an in-test ERP event fixture.
+
+Pending or deferred:
+
+- replay-during-reservation exception and controller/service contract alignment;
+- full compile and integration verification;
+- restart/recovery coverage for replay and Kafka redelivery;
+- Stage 6 reconciliation, ledger posting, refunds/chargebacks, and a production ERP consumer.
+
+The detailed handoff checklist is in [Stage 5 Outbox, Kafka, and ERP Contract](stage-5-outbox-kafka-erp.md#12-stage-5-handoff).
 
 ---
 
@@ -22,10 +40,8 @@
 * Payment initiation API.
 * Payment-method processing (simulated providers).
 * Payment state machine.
-* Double-entry financial ledger (immutable).
-* Idempotency (Redis cache + PostgreSQL authority).
+* Idempotency (PostgreSQL authority).
 * Kafka events + transactional outbox.
-* Settlement & reconciliation engine.
 * Observability (MDC, Micrometer, structured logs).
 
 A **lightweight mock ERP** and **mock payment providers** are allowed as test fixtures to validate contracts — not as production modules.
@@ -35,27 +51,26 @@ A **lightweight mock ERP** and **mock payment providers** are allowed as test fi
 ## 2. High-level architecture
 
 ```
-         +-----------------+      REST callback (optional)      +-----------------+
-         |  External ERP   | ---------------------------------> |  Mock ERP (test)|
-         |  (owner of       |                                    |  (in-process
-         |   invoices)      |                                    |   WireMock)     |
-         +-----------------+      GET /payments/{id}            +-----------------+
-                  |   1. POST /api/v1/payments/charge
-                  |        Idempotency-Key, billRef, amount
-                  v
+         +-----------------+      POST /api/v1/payments       +-----------------+
+         |  External ERP   | ------------------------------> |  Mock ERP (test)|
+         |  (owner of       | Idempotency-Key, billRef, amount|  (in-process    |
+         |   invoices)      |                                |   fixture)      |
+         +-----------------+                                +-----------------+
+                   |
+                   v
          +---------------------------------------------------+
          |  PAYMENT GATEWAY & SETTLEMENT CORE ENGINE         |
          |                                                   |
          |  API (Spring MVC + virtual threads)              |
          |  Payment Orchestration  PaymentProcessor SPI       |
-         |  Idempotency  Ledger  Outbox/Kafka  Reconciliation|
+         |  Idempotency  Outbox/Kafka  Recovery              |
          |  Observability (MDC + Micrometer)                |
          +---------------------------------------------------+
-             |            |            |             |
-             v            v            v             v
-        PostgreSQL      Redis       Kafka        Simulated
-        (source of truth)(cache)     (events)     Provider HTTP
-             (migrations via Flyway)
+              |            |            |
+              v            v            v
+         PostgreSQL      Kafka        Simulated
+         (source of truth)(events)     Provider HTTP
+              (migrations via Flyway)
 ```
 
 ### Component responsibilities & data ownership
@@ -66,10 +81,10 @@ A **lightweight mock ERP** and **mock payment providers** are allowed as test fi
 | **Payment Orchestration** | `Payment` aggregate (status, provider_ref) | invoice balances (ERP) |
 | **PaymentProcessor SPI** | provider HTTP request/response shapes | card raw digits, CVV |
 | **Idempotency** | `IDEMPOTENCY` table (key, hash, terminal response) | balance computation |
-| **Ledger** | `JOURNAL_ENTRY`, `JOURNAL_LINE`, `LEDGER_ACCOUNT` (immutable) | mutable balance as source of truth |
+| **Ledger** | Deferred to Stage 6+; no posting in the current baseline | mutable balance as source of truth |
 | **Outbox** | `OUTBOX` rows (atomic with payment commit) | Kafka broker state |
-| **Kafka consumer** | `PROCESSED_EVENT` dedup | payment status as source of truth |
-| **Reconciliation** | `RECONCILIATION_RUN`, `RECONCILIATION_RESULT` | ERP invoice balance |
+| **Kafka consumer** | Deferred production ERP consumer; test fixture only in Stage 5 | payment status as source of truth |
+| **Reconciliation** | Deferred to Stage 6; no settlement tables or matching job in the current baseline | ERP invoice balance |
 
 ---
 
@@ -80,29 +95,29 @@ com.paymentgateway.settlement
 ├── PaymentGatewaySettlementApplication.java
 │
 ├── api                            # REST boundaries
-│   └── controller / dto / mapper
+│   ├── controller                 # payment and internal health endpoints
+│   └── dto                        # request/response DTOs and mapper
 │
 ├── domain                         # Pure domain (no framework deps)
 │   ├── payment                    # aggregate, state machine, value objects
-│   ├── ledger                     # journal, accounts
-│   ├── idempotency                # IdempotencyKey value object
-│   ├── money                      # Money (minor units), Currency
-│   ├── event                      # domain events (internal)
-│   └── exception                  # ApiError, domain exceptions
+│   ├── idempotency                # IdempotencyKey and conflict exception
+│   ├── event                      # versioned payment lifecycle event
+│   └── money                      # Money (minor units), Currency
 │
 ├── application                    # Use cases & orchestration
-│   ├── service                    # ChargeService, LedgerService, ReconciliationJob
-│   └── port                       # SPIs (PaymentProcessor, IdempotencyService)
+│   ├── port                       # PaymentProcessor, IdempotencyService SPIs
+│   └── service                    # ChargeService, PaymentRecoveryService,
+│   │                              # OutboxEventService
 │
 ├── infrastructure                 # Adapters (infra → port wiring)
 │   ├── persistence                # JPA entities, repositories, Flyway
-│   ├── messaging                  # Kafka producer/consumer, OutboxProcessor
-│   ├── external                   # PaymentProviderClient, ErpClient, mocks
-│   ├── idempotency                # RedisIdempotencyCache
-│   ├── reconciliation             # SettlementFileGenerator, match engine
-│   ├── observability              # MdcFilter, metrics, logging
-│   └── config                     # Bean wiring, KafkaProducer config
+│   ├── messaging                  # Kafka producer/outbox publisher
+│   ├── external/provider          # simulated payment processor
+│   ├── scheduling                 # recovery scheduler
+│   └── idempotency                # PostgreSQL idempotency adapter
 │
+├── config                         # outbox/recovery properties and Kafka beans
+├── observability                  # MDC/correlation filter, request logging
 └── test                           # Testcontainers, fixtures, contracts
 ```
 
@@ -116,13 +131,13 @@ com.paymentgateway.settlement
 
 1. **ERP** already generated bill `INV-2024-00743`, amount ₹1,250.00; outstanding balance is shown in ERP UI.
 2. **User** selects UPI in ERP UI. ERP calls our gateway:
-   `POST /api/v1/payments/charge` with `Idempotency-Key: ik-abc`, payload as in §5.1.
-3. **Gateway** validates merchant, currency, method; checks Redis then PostgreSQL idempotency record (`SELECT FOR UPDATE` on `(merchant_id, idempotency_key)`).
-4. **Gateway** inserts `INIT` payment + DEBIT journaling (`CASH_UPI` debit, `SETTLEMENT_LIABILITY` credit) + idempotency row — **single transaction, committed**.
-5. **Gateway** invokes simulated UPI provider HTTP `/v1/payments` → returns `200 {status: SUCCESS, ref: upi_txn_99}`.
-6. **Gateway** (new TX): updates payment to `SUCCEEDED`, inserts CREDIT journal (`REVENUE` credit, `FEES_EXPENSE` debit), inserts `OUTBOX` row — committed.
-7. **Outbox processor** polls PENDING rows, sends Kafka record `payment.status` (key=`payment_id`), marks row `PUBLISHED`.
-8. **ERP** consumes Kafka `payment.status` (or polls `GET /payments/{id}`), updates its invoice to PAID / NO_DUES.
+   `POST /api/v1/payments` with `Idempotency-Key: ik-abc`, `billRef`, amount, and a non-sensitive payment token.
+3. **Gateway** validates the request and reserves the idempotency key in PostgreSQL.
+4. **Gateway** inserts the `CREATED` payment and `PaymentCreated` outbox row in one transaction and commits.
+5. **Gateway** invokes the simulated provider outside the database transaction.
+6. **Gateway** opens a second transaction, transitions the payment, appends `PaymentProcessingStarted` and the provider-result event, flushes the payment, and finalizes idempotency.
+7. **Outbox publisher** polls pending rows with `FOR UPDATE SKIP LOCKED`, sends the event to `payment.events` using the payment UUID key, and marks the row published only after Kafka acknowledgement.
+8. **ERP** consumes the stable JSON envelope, deduplicates by `eventId`, correlates by `paymentId`/`erpReference`, and applies its own invoice business rules.
 
 ### 4.2 Partial payment flow
 
@@ -136,37 +151,41 @@ Steps 3–4 complete; at step 5 provider returns **timeout**. Gateway sets payme
 
 ## 5. API contracts
 
-### 5.1 `POST /api/v1/payments/charge`
+### 5.1 `POST /api/v1/payments`
 
 ```jsonc
 // REQUEST
 // Header: Idempotency-Key: ik-abc-123   (merchant-scoped, required)
 // Header: X-Correlation-Id: corr-001    (optional, generated if absent)
 {
-  "merchantId": "m_5f2e",              // required, must be a registered merchant
-  "customerRef": "c_8812",             // required, opaque token
-  "billRef": "INV-2024-00743",         // required, ERP's identifier
-  "amount": "1250.00",                 // required, BigDecimal-as-string (2 decimals for INR)
+  "merchantId": "m_5f2e",              // required
+  "customerRef": "c_8812",             // required, opaque ERP reference
+  "billRef": "INV-2024-00743",         // required, ERP bill identifier
+  "amount": "1250.00",                 // required, decimal string
   "currency": "INR",                   // required, ISO-4217
-  "paymentMethod": "UPI",              // required, UPI|CREDIT_CARD|DEBIT_CARD|NET_BANKING
-  "paymentToken": "upi://pay/xyz@kok|...",  // required, tokenized/simulated
-  "callbackUrl": "https://erp.local/webhook/pay" // optional
+  "paymentMethod": "UPI",              // required: UPI|CREDIT_CARD|DEBIT_CARD|NET_BANKING
+  "paymentToken": "upi://pay/xyz@kok"  // required, tokenized/simulated; never persisted or returned
 }
 
 // RESPONSE (201 Created, new) OR (200 OK, idempotent replay)
 {
   "paymentId": "p_7e3a9b",
   "merchantId": "m_5f2e",
+  "customerRef": "c_8812",
   "billRef": "INV-2024-00743",
-  "amount": "1250.00",
+  "amount": 1250.00,
   "currency": "INR",
   "paymentMethod": "UPI",
-  "status": "SUCCEEDED",               // PENDING for timeout/unknown
-  "providerRef": "upi_txn_99",
-  "processedAt": "2026-09-13T17:22:10Z",
+  "status": "SUCCEEDED",
+  "providerReference": "upi_txn_99",
+  "failureCode": null,
+  "failureReason": null,
+  "correlationId": "corr-001",
+  "createdAt": "2026-09-13T17:20:00Z",
+  "updatedAt": "2026-09-13T17:22:10Z",
   "links": {
     "self": "/api/v1/payments/p_7e3a9b",
-    "statusHistory": "/api/v1/payments/p_7e3a9b/events"
+    "billPayments": "/api/v1/payments/by-bill/INV-2024-00743"
   }
 }
 ```
@@ -175,19 +194,21 @@ Steps 3–4 complete; at step 5 provider returns **timeout**. Gateway sets payme
 
 | Code | Meaning |
 |---|---|
-| 201 | New payment accepted & completed synchronously |
-| 200 | Idempo-key replay of an already-completed payment |
-| 202 | Accepted, processing asynchronously (timeout/unknown) |
-| 400 | JSON validation failed (missing/invalid field) |
-| 409 | Idempotency key reused **with a different payload and not terminal** |
-| 422 | Merchant unknown / currency unsupported |
-| 429 | Too many concurrent idempotency checks for this key (rare) |
+| 201 | New payment accepted and processed |
+| 200 | Idempotency-key replay of an existing result |
+| 400 | JSON validation or business-rule failure |
+| 404 | Payment not found |
+| 409 | Idempotency conflict, illegal state transition, or optimistic-lock conflict |
+| 500 | Unexpected failure |
+
+`202 ACCEPTED` for an `UNKNOWN` outcome is part of the intended asynchronous contract, but the current controller/service status mapping is pending alignment in the Stage 5 handoff.
 
 **Idempotency rules**:
-* Same key + same payload hash → return stored result (terminal or `202 UNKNOWN`).
-* Same key + **different** payload hash + non-terminal in-flight → `409` conflict.
-* Same key + different payload + **terminal** stored → return stored result anyway (payload ignored — the key locked the outcome).
-* Redis TTL 5 min, PostgreSQL row authoritative.
+
+* Same key + same request fingerprint -> return the stored result without another provider call.
+* Same key + different fingerprint + non-terminal in-flight request -> `409`.
+* Same key + different fingerprint + terminal stored result -> return the stored result.
+* PostgreSQL is authoritative. The current baseline has no Redis idempotency adapter; Redis dependency/configuration is present but replay correctness must not depend on it.
 
 ### 5.2 `GET /api/v1/payments/{paymentId}`
 
@@ -196,45 +217,39 @@ Steps 3–4 complete; at step 5 provider returns **timeout**. Gateway sets payme
 {
   "paymentId": "p_7e3a9b",
   "merchantId": "m_5f2e",
-  "billRef": "INV-2024-00743",
   "customerRef": "c_8812",
-  "amount": "1250.00",
+  "billRef": "INV-2024-00743",
+  "amount": 1250.00,
   "currency": "INR",
   "paymentMethod": "UPI",
   "status": "SUCCEEDED",
-  "providerRef": "upi_txn_99",
+  "providerReference": "upi_txn_99",
+  "failureCode": null,
   "failureReason": null,
-  "requestedAt": "2026-09-13T17:20:00Z",
-  "processedAt": "2026-09-13T17:22:10Z"
+  "correlationId": "corr-001",
+  "createdAt": "2026-09-13T17:20:00Z",
+  "updatedAt": "2026-09-13T17:22:10Z",
+  "links": {
+    "self": "/api/v1/payments/p_7e3a9b",
+    "billPayments": "/api/v1/payments/by-bill/INV-2024-00743"
+  }
 }
 // 404 if not found
 ```
 
-### 5.3 `POST /api/v1/payments/status/bulk` (N+1-safe)
+### 5.3 Bill lookup
 
-```jsonc
-// REQUEST
-{ "paymentIds": ["p_7e3a9b", "p_4c1x", "p_88zz"] }   // max 500
-
-// RESPONSE — single `WHERE payment_id = ANY(?)` query
-[
-  {"paymentId":"p_7e3a9b","status":"SUCCEEDED","amount":125000,"currency":"INR"},
-  {"paymentId":"p_4c1x","status":"UNKNOWN","amount":0,"currency":"INR"},
-  {"paymentId":"p_88zz","status":"FAILED"}
-]
-```
+`GET /api/v1/payments/by-bill/{billReference}?merchantId=...` returns all payments for an ERP bill reference using one repository query. A separate bulk-status endpoint is deferred.
 
 ### 5.4 ERP payment confirmation mechanism
 
 | Option | Trade-off |
 |---|---|
-| **Polling** `GET /payments/{id}` | Simple, reliable, but latency + load on gateway. |
-| **REST callback** `callbackUrl` | Push-based, but gateway owns retry/delivery; ERP must be idempotent & online. |
-| **Kafka consume** `payment.status` | Best for high volume; ordering by partition; replayable; **requires ERP to be a Kafka consumer**. |
+| **Polling** `GET /payments/{id}` | Implemented and simple; adds latency/load on the gateway. |
+| **Kafka consume** `payment.events` | Preferred high-volume path; ordering by payment key and replayable retention. The production ERP consumer is not implemented in the current baseline. |
+| **REST callback** | Deferred; `callbackUrl` is not part of the current request DTO. |
 
-**Recommendation for this educational project**: **Kafka is authoritative** for the integration event (matches §9). The ERP mock will be a **Kafka consumer** in integration tests. A **polling fallback** (§5.2) is also provided so ERPs that can't consume Kafka still work. REST callback is **supported but not required** — implemented via the same outbox so delivery is idempotent; if ERP is down the callback retries against the durable event.
-
-**Data ownership reminder**: the callback/event is **informational**. The ERP applies it to its own invoice row and is itself responsible for exactly-once invoice update via its own idempotency.
+**Current recommendation**: publish the versioned `PaymentLifecycleEvent` envelope to `payment.events`. The Stage 5 test fixture consumes it in-process; the external ERP remains responsible for `eventId` deduplication and invoice updates. Polling remains available as a fallback.
 
 ---
 
@@ -257,7 +272,7 @@ public sealed interface PaymentProcessor
 
 | Scenario | Provider response | Gateway status |
 |---|---|---|
-| Success | `200 {status:SUCCESS, ref}` | `SUCCEEDED` + ledger posted |
+| Success | `200 {status:SUCCESS, ref}` | `SUCCEEDED` + outbox event appended; ledger posting deferred |
 | Decline (card decline / insufficient) | `200 {status:DECLINED, reason}` | `FAILED` |
 | Timeout | no response > N ms | `UNKNOWN` (202 issued) |
 | HTTP 500 / connection error | `5xx` or `ConnectException` | `FAILED` (retry-safe — **only safe because no money moved**) |

@@ -57,3 +57,18 @@ app:
   environment: ${APP_ENV:local}
   correlation-id:
     header-name: X-Correlation-Id
+  outbox:
+    enabled: true
+    polling-interval: 1s
+    batch-size: 50
+    max-attempts: 10
+    retry-base-backoff: 1s
+    retry-max-backoff: 30s
+    send-timeout: 10s
+    lease-duration: 30s
+    kafka:
+      topic: payment.events
+      dead-letter-topic: payment.events.DLQ
+      consumer-group: external-erp-payment-events
+  erp:
+    consumer-group: external-erp-payment-events

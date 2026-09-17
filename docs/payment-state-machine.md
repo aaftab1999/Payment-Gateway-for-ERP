@@ -19,6 +19,12 @@ The state machine logic lives in the domain layer (not persistence), making it f
 | `VOIDED` | Yes | **Future state (Stage 4+).** Voided before capture. Not reachable in Stage 3. |
 | `REFUNDED` | Yes | **Future state (Stage 4+).** Fully refunded. Not reachable in Stage 3. |
 
+## Stage 5 Event Mapping
+
+A committed state change appends an explicit outbox event in the same database transaction. `PaymentCreated` is appended with the initial payment insert. `PaymentProcessingStarted` is appended after `CREATED -> PROCESSING`; the provider result appends `PaymentSucceeded`, `PaymentFailed`, or `PaymentUnknown`. Recovery scheduling and exhaustion append `PaymentRetryScheduled` and `PaymentRetryExhausted`. No event is appended when the state engine rejects a transition.
+
+Events carry `eventOrder`, `eventId`, `correlationId`, and `causationId`; see [Stage 5 Outbox, Kafka, and ERP Contract](stage-5-outbox-kafka-erp.md).
+
 ## Legal State Transitions (Stage 3)
 
 ```
@@ -104,27 +110,29 @@ Called by the reconciliation/polling job (Stage 4). Transitions `UNKNOWN → SUC
 
 ## Transaction Boundaries
 
-The state machine is enforced within the `ChargeService` two-phase transaction model:
+The state machine is enforced by `ChargeService` with explicit transaction templates:
 
 ### TX1 (Create)
-- Transaction scope: `@Transactional` (REQUIRED)
-- Action: Creates payment in `CREATED` state, persists to database, commits.
-- The payment must be durable before the provider call — if the app crashes, the payment is in `CREATED` state for reconciliation.
+- Transaction scope: `TransactionTemplate` (REQUIRED)
+- Action: Creates payment in `CREATED`, persists the payment and `PaymentCreated` outbox row, reserves idempotency, and commits.
+- The payment and outbox row are atomic. The provider call starts only after this transaction returns.
 
 ### Provider Call (Outside Transaction)
-- No database transaction, no locks held.
-- The provider is called synchronously. If it throws an exception, the result is mapped to `ProviderResult.technicalFailure()`.
+- No database transaction or row lock is held.
+- Provider exceptions become a technical-failure result for TX2.
 
 ### TX2 (Apply Result)
-- Transaction scope: `@Transactional` (REQUIRED)
+- Transaction scope: `TransactionTemplate` (REQUIRED)
 - Action:
-  1. `SELECT FOR UPDATE` (via `findAndLockByPaymentId`) — locks the row
-  2. Reconstitutes `Payment` from entity (bypassing validation)
-  3. `markProcessing()` — CREATED → PROCESSING
-  4. `applyProviderResult()` — PROCESSING → terminal state
-  5. Updates entity in place (`updateFromDomain`)
-  6. Flushes and commits
-- Retry loop: up to 3 attempts on `ObjectOptimisticLockingFailureException` with 50ms × attempt backoff.
+  1. `SELECT FOR UPDATE` (via `findAndLockByPaymentId`)
+  2. Reconstitutes `Payment` from the entity
+  3. `markProcessing()` — `CREATED -> PROCESSING`
+  4. Appends `PaymentProcessingStarted`
+  5. Applies the provider result
+  6. Appends the matching terminal/unknown event only when the status changes
+  7. Flushes the payment and finalizes idempotency in the same transaction
+
+The recovery use case uses the same transactional outbox service for retry scheduling, processing re-entry, and retry exhaustion.
 
 ## Why UNKNOWN and REQUIRES_RECONCILIATION Are Not Terminal
 

@@ -34,16 +34,14 @@ CREATE TABLE IF NOT EXISTS idempotency (
     idempotency_id    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     merchant_id       VARCHAR(255) NOT NULL,
     idempotency_key   VARCHAR(255) NOT NULL,
-    request_hash      VARCHAR(64)  NOT NULL,                 -- SHA-256 of canonical request payload
+    request_hash      VARCHAR(64)  NOT NULL,
     payment_id        UUID         NOT NULL REFERENCES payment(payment_id),
-    response_status   INTEGER      NOT NULL,                 -- HTTP status cached for replay
-    response_body     JSONB        NOT NULL,                 -- reconstructable response payload
-    is_terminal       BOOLEAN      NOT NULL,                 -- true when payment reached a terminal state
+    response_status   INTEGER      NOT NULL,
+    response_body     JSONB        NOT NULL,
+    is_terminal       BOOLEAN      NOT NULL,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    expires_at        TIMESTAMPTZ  NOT NULL,                 -- TTL for cache cleanup
-    -- Enforces uniqueness at the DB level. Two concurrent inserts for the
-    -- same (merchant_id, idempotency_key) serialize on this PK.
-    PRIMARY KEY (merchant_id, idempotency_key)
+    expires_at        TIMESTAMPTZ  NOT NULL,
+    UNIQUE (merchant_id, idempotency_key)
 );
 
 -- Fast lookup by payment_id (reverse resolution: payment -> idempotency row)
@@ -66,9 +64,8 @@ ALTER TABLE payment
 -- provider_idempotency_key is unique so the provider never charges the same
 -- logical attempt twice. Nullable because not all outcomes produce a provider
 -- reference (e.g. declines / timeouts).
-ALTER TABLE payment
-    ADD CONSTRAINT IF NOT EXISTS uq_payment_provider_idempotency_key
-    UNIQUE (provider_idempotency_key)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_provider_idempotency_key
+    ON payment(provider_idempotency_key)
     WHERE provider_idempotency_key IS NOT NULL;
 
 -- Indexes for recovery queries (find payments stuck in non-terminal states)

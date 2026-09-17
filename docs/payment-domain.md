@@ -40,7 +40,7 @@ All domain code lives in `src/main/java/com/paymentgateway/settlement/domain/pay
 
 - `markProcessing()` — `CREATED → PROCESSING`
 - `applyProviderResult(ProviderResult)` — `PROCESSING → terminal/intermediate`
-- `resolveUnknown(PaymentStatus, ...)` — `UNKNOWN → SUCCEEDED | FAILED`
+- `resolveReconciliation(PaymentStatus, ...)` — `UNKNOWN -> SUCCEEDED | FAILED`
 - `setJournalEntryId(UUID)` — Sets the ledger journal entry ID (Stage 4+).
 
 ## Money and Currency

@@ -51,7 +51,7 @@ public interface IdempotencyRepository extends JpaRepository<IdempotencyEntity, 
                  response_status, response_body, is_terminal, created_at, expires_at)
             VALUES
                 (:merchantId, :idempotencyKey, :requestHash, :paymentId,
-                 :responseStatus, :responseBody, :isTerminal, now(), :expiresAt)
+                 :responseStatus, CAST(:responseBody AS JSONB), :isTerminal, now(), :expiresAt)
             """, nativeQuery = true)
     int insertReservation(@Param("merchantId") String merchantId,
                           @Param("idempotencyKey") String idempotencyKey,

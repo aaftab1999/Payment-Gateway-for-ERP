@@ -1,8 +1,10 @@
 package com.paymentgateway.settlement.application.service;
 
 import com.paymentgateway.settlement.config.RecoveryProperties;
+import com.paymentgateway.settlement.domain.event.PaymentEventType;
 import com.paymentgateway.settlement.domain.payment.Payment;
 import com.paymentgateway.settlement.domain.payment.PaymentStatus;
+import com.paymentgateway.settlement.infrastructure.persistence.entity.OutboxEventEntity;
 import com.paymentgateway.settlement.infrastructure.persistence.entity.PaymentEntity;
 import com.paymentgateway.settlement.infrastructure.persistence.repository.PaymentRepository;
 
@@ -46,11 +48,14 @@ public class PaymentRecoveryService {
 
     private final PaymentRepository paymentRepository;
     private final RecoveryProperties properties;
+    private final OutboxEventService outboxEventService;
 
     public PaymentRecoveryService(final PaymentRepository paymentRepository,
-                                  final RecoveryProperties properties) {
+                                  final RecoveryProperties properties,
+                                  final OutboxEventService outboxEventService) {
         this.paymentRepository = paymentRepository;
         this.properties = properties;
+        this.outboxEventService = outboxEventService;
     }
 
     /**
@@ -132,6 +137,15 @@ public class PaymentRecoveryService {
             payment.markRetryExhausted("Retry budget exhausted after " +
                     properties.getMaxRetries() + " attempts");
             locked.updateFromDomain(payment);
+            outboxEventService.append(
+                    payment,
+                    PaymentEventType.PAYMENT_RETRY_EXHAUSTED,
+                    payment.getStatus(),
+                    "RETRY_EXHAUSTED",
+                    outboxEventService.findLatestEventId(payment.getPaymentId().toUuid()).orElse(null),
+                    payment.getAttemptCount(),
+                    null
+            );
             return;
         }
 
@@ -143,21 +157,56 @@ public class PaymentRecoveryService {
         // Ensure the provider idempotency key is stable.
         payment.ensureProviderIdempotencyKey();
 
-        // Re-enter PROCESSING for the retry.
-        if (payment.getStatus() == PaymentStatus.UNKNOWN ||
-                payment.getStatus() == PaymentStatus.REQUIRES_RECONCILIATION) {
-            payment.markRetrySubmitted();
-        } else if (payment.getStatus() == PaymentStatus.CREATED ||
-                payment.getStatus() == PaymentStatus.PROCESSING) {
-            // Already in PROCESSING or CREATED — just record the attempt.
-            payment.markProcessing();
-        }
-
-        // Schedule the next retry with exponential backoff.
+        PaymentStatus statusBeforeRetry = payment.getStatus();
         long backoff = Math.min(
                 properties.getBaseBackoffMs() * (1L << payment.getAttemptCount()),
                 properties.getMaxBackoffMs());
-        payment.scheduleNextRetry(now.plusMillis(backoff));
+        Instant nextRetryAt = now.plusMillis(backoff);
+        int retryAttempt = payment.getAttemptCount() + 1;
+
+        OutboxEventEntity scheduledEvent = null;
+        if (statusBeforeRetry == PaymentStatus.CREATED
+                || statusBeforeRetry.isAwaitingResolution()) {
+            scheduledEvent = outboxEventService.append(
+                    payment,
+                    PaymentEventType.PAYMENT_RETRY_SCHEDULED,
+                    statusBeforeRetry,
+                    "RETRY_SCHEDULED",
+                    outboxEventService.findLatestEventId(payment.getPaymentId().toUuid()).orElse(null),
+                    retryAttempt,
+                    nextRetryAt
+            );
+            log.info("Payment retry scheduled: paymentId={}, eventId={}, attempt={}, nextRetryAt={}",
+                    payment.getPaymentId(), scheduledEvent.getEventId(), retryAttempt, nextRetryAt);
+        }
+
+        // Re-enter PROCESSING for the retry.
+        if (statusBeforeRetry == PaymentStatus.UNKNOWN ||
+                statusBeforeRetry == PaymentStatus.REQUIRES_RECONCILIATION) {
+            payment.markRetrySubmitted();
+        } else if (statusBeforeRetry == PaymentStatus.CREATED ||
+                statusBeforeRetry == PaymentStatus.PROCESSING) {
+            payment.markProcessing();
+        }
+
+        if (payment.getStatus() != statusBeforeRetry) {
+            OutboxEventEntity processingEvent = outboxEventService.append(
+                    payment,
+                    PaymentEventType.PAYMENT_PROCESSING_STARTED,
+                    statusBeforeRetry,
+                    "RETRY_SUBMITTED",
+                    statusBeforeRetry == PaymentStatus.CREATED
+                            || statusBeforeRetry.isAwaitingResolution()
+                            ? scheduledEvent.getId()
+                            : null,
+                    retryAttempt,
+                    null
+            );
+            log.info("Payment retry processing started: paymentId={}, eventId={}, previousStatus={}",
+                    payment.getPaymentId(), processingEvent.getEventId(), statusBeforeRetry);
+        }
+
+        payment.scheduleNextRetry(nextRetryAt);
 
         locked.updateFromDomain(payment);
         log.info("Scheduled recovery for payment {}: status={}, attemptCount={}, nextRetryAt={}",

@@ -11,7 +11,7 @@ A production-oriented educational **payment gateway and settlement core engine**
 | Web | Spring MVC + **virtual threads** |
 | Database | PostgreSQL 16 (Flyway migrations) |
 | Cache | Redis 7 (idempotency — cache-only, not source of truth) |
-| Events | Apache Kafka (Strimzi KRaft) |
+| Events | Apache Kafka 3.8 (KRaft) |
 | Persistence | Spring Data JPA + JDBC |
 | Observability | Micrometer (Prometheus), Actuator, SLF4J/Logback + MDC |
 | Tests | JUnit 5 + Testcontainers + Awaitility |
@@ -24,7 +24,7 @@ A production-oriented educational **payment gateway and settlement core engine**
 docker compose up -d
 
 # 2. Run the application (local profile)
-./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+mvn spring-boot:run -Dspring-boot.run.profiles=local
 
 # 3. Verify
 curl http://localhost:8080/api/v1/internal/health
@@ -51,7 +51,7 @@ src/
 │   ├── application.yml                             # shared config
 │   ├── application-local.yml                       # local dev (Docker Compose)
 │   ├── application-test.yml                        # test defaults
-│   └── db/migration/V1_0__baseline.sql             # Flyway migration
+│   └── db/migration/                             # Flyway payment, idempotency, outbox migrations
 └── test/                                          # Testcontainers integration tests
 ```
 
@@ -59,10 +59,11 @@ src/
 
 | External ERP owns | Gateway owns |
 |---|---|
-| Customers, invoices, bills, outstanding balances, customer-facing UI | Payment records, payment state, idempotency, double-entry ledger, provider integration, payment events, settlement, reconciliation, observability |
+| Customers, invoices, bills, outstanding balances, customer-facing UI | Payment records, payment state, idempotency, provider integration, payment events; ledger, settlement, and reconciliation are deferred |
 
 ## Documentation
 
 * [Local Development Guide](docs/local-development.md)
+* [Stage 5 Outbox, Kafka, and ERP Contract](docs/stage-5-outbox-kafka-erp.md)
 * [Foundation Decisions](docs/foundation-decisions.md)
 * [Full Architecture](docs/architecture.md)

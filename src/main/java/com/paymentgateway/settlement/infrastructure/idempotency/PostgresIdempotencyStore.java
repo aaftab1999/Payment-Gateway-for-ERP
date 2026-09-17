@@ -32,7 +32,7 @@ import java.util.UUID;
 public class PostgresIdempotencyStore implements IdempotencyService {
 
     private static final Logger log = LoggerFactory.getLogger(PostgresIdempotencyStore.class);
-    private static final Instant NO_EXPIRY = Instant.MAX;
+    private static final Instant NO_EXPIRY = Instant.parse("9999-12-31T23:59:59Z");
 
     private final IdempotencyRepository idempotencyRepository;
 

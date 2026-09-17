@@ -5,6 +5,7 @@ import com.paymentgateway.settlement.api.dto.PaymentDtoMapper;
 import com.paymentgateway.settlement.api.dto.PaymentResponse;
 import com.paymentgateway.settlement.application.port.IdempotencyOutcome;
 import com.paymentgateway.settlement.application.port.IdempotencyService;
+import com.paymentgateway.settlement.application.service.ChargeResult;
 import com.paymentgateway.settlement.application.service.ChargeService;
 import com.paymentgateway.settlement.domain.idempotency.IdempotencyKey;
 import com.paymentgateway.settlement.domain.idempotency.IdempotencyKeyConflictException;
@@ -15,9 +16,11 @@ import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -89,17 +92,17 @@ public class PaymentController {
         log.info("Received payment request: merchant={}, billRef={}, amount={}",
                 body.merchantId(), body.billRef(), body.amount());
 
-        // --- Idempotency check (fast path) ---
+        // --- Idempotency reservation (fast path) ---
+        IdempotencyKey key = IdempotencyKey.of(idempotencyKey);
+        String fingerprint = requestFingerprint(body);
+        UUID paymentId = UUID.randomUUID();
         try {
-            IdempotencyKey key = IdempotencyKey.of(idempotencyKey);
-            String fingerprint = requestFingerprint(body);
             IdempotencyOutcome outcome = idempotencyService.reserve(
-                    body.merchantId(), key, fingerprint, UUID.randomUUID());
+                    body.merchantId(), key, fingerprint, paymentId);
 
             if (outcome instanceof IdempotencyOutcome.ReplayOutcome replay) {
                 log.info("Idempotent replay for key={}: paymentId={}",
                         maskKey(idempotencyKey), replay.paymentId());
-                // Fetch the payment directly to build the response.
                 Payment payment = chargeService.getPayment(UUID.fromString(replay.paymentId()));
                 PaymentResponse cached = PaymentDtoMapper.toResponse(payment, base);
                 return ResponseEntity.status(replay.responseStatus() == 201 ? 201 : 200).body(cached);
@@ -112,20 +115,26 @@ public class PaymentController {
                         idempotencyKey, conflict.existingPaymentId());
             }
         } catch (RuntimeException e) {
+            String msg = e.getMessage();
+            if (msg == null || (!msg.contains("23505") && !msg.contains("unique"))) {
+                throw e;
+            }
             log.info("Idempotency unique violation on key={}, re-reading existing row",
                     maskKey(idempotencyKey));
-            IdempotencyKey key = IdempotencyKey.of(idempotencyKey);
-            var replay = idempotencyService.replay(body.merchantId(), key);
+            Optional<IdempotencyOutcome.ReplayOutcome> replay = idempotencyService.replay(
+                    body.merchantId(), key);
             if (replay.isPresent()) {
-                Payment payment = chargeService.getPayment(UUID.fromString(replay.get().paymentId()));
+                Payment payment = chargeService.getPayment(
+                        UUID.fromString(replay.get().paymentId()));
                 PaymentResponse cached = PaymentDtoMapper.toResponse(payment, base);
-                return ResponseEntity.status(replay.get().responseStatus() == 201 ? 201 : 200).body(cached);
+                return ResponseEntity.status(replay.get().responseStatus() == 201 ? 201 : 200)
+                        .body(cached);
             }
             throw new IdempotencyKeyConflictException(
                     "Idempotency key already in use", idempotencyKey, null);
         }
 
-        Payment payment = chargeService.charge(
+        ChargeResult result = chargeService.chargeWithOutcome(
                 body.merchantId(),
                 body.customerRef(),
                 body.billRef(),
@@ -134,11 +143,13 @@ public class PaymentController {
                 body.paymentMethod(),
                 body.paymentToken(),
                 corrId,
-                idempotencyKey
+                idempotencyKey,
+                paymentId
         );
 
-        PaymentResponse response = PaymentDtoMapper.toResponse(payment, base);
-        return ResponseEntity.status(201).body(response);
+        PaymentResponse response = PaymentDtoMapper.toResponse(result.payment(), base);
+        return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
+                .body(response);
     }
 
     /**

@@ -17,14 +17,15 @@ docker compose up -d
 |---|---|---|---|---|
 | PostgreSQL | `postgres:16-alpine` | `15432:5432` | user: `pgs`, db: `pgs`, pass: `pgs_secret` | Financial source of truth |
 | Redis | `redis:7-alpine` | `16379:6379` | none (no auth in dev) | Idempotency cache (not source of truth) |
-| Kafka | `quay.io/strimzi/kafka:latest-kraft` | `19092:9092` | none | Payment event streaming |
+| Kafka | `apache/kafka:3.8.1` | `19092:9092` | none | Payment event streaming |
+| Kafka topic init | `apache/kafka:3.8.1` | internal | none | Creates `payment.events` and `payment.events.DLQ` |
 
 > Container ports are offset (15xxx, 16xxx, 19xxx) so they don't conflict with any existing local services.
 
 ## 2. Start the application
 
 ```bash
-./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+mvn spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
 * API: `http://localhost:8080/api/v1/`
@@ -63,19 +64,22 @@ redis-cli -p 16379 KEYS '*'
 ### Kafka
 
 ```bash
+# Start Kafka and run the one-shot topic initializer
+docker compose up -d kafka kafka-init
+
 # Enter the Kafka container
 docker exec -it pgw-kafka bash
 
-# List topics
-kafka-topics.sh --bootstrap-server localhost:19092 --list
+# List topics using the internal listener
+kafka-topics.sh --bootstrap-server localhost:29092 --list
 
-# Create a topic (future stages)
-kafka-topics.sh --bootstrap-server localhost:19092 \
-  --create --topic payment.status --replication-factor 1 --partitions 6
+# Inspect the payment topic
+kafka-topics.sh --bootstrap-server localhost:29092 \
+  --describe --topic payment.events
 
-# Consume events (future stages)
-kafka-console-consumer.sh --bootstrap-server localhost:19092 \
-  --topic payment.status --from-beginning
+# Consume events
+kafka-console-consumer.sh --bootstrap-server localhost:29092 \
+  --topic payment.events --from-beginning
 ```
 
 ## 5. Run tests
@@ -83,26 +87,35 @@ kafka-console-consumer.sh --bootstrap-server localhost:19092 \
 ### Unit / smoke tests (no Docker)
 
 ```bash
-./mvnw test -Dspring.profiles.active=test
+mvn test -Dspring.profiles.active=test
 ```
 
 ### Integration tests (Docker required)
 
 ```bash
 # Full suite including Testcontainers
-./mvnw verify
+mvn verify
 
-# Run a single integration test
-./mvnw verify -Dtest=PostgresFlywayIntegrationTest
+# Transactional outbox
+mvn test -Dtest=PaymentOutboxTransactionIntegrationTest
 
-# Skip integration tests (run unit only)
-./mvnw test
+# Publisher retries
+mvn test -Dtest=OutboxPublisherRetryIntegrationTest
+
+# Kafka publishing and ERP fixture
+mvn test -Dtest=KafkaOutboxIntegrationTest
+
+# Skip Docker-backed tests when Docker is unavailable
+mvn test -Dtest='!*IntegrationTest'
 ```
+
+Stage 5 uses Testcontainers with dynamically allocated PostgreSQL and Kafka ports. Do not hard-code host port `15432` for Kafka tests.
+
 
 ### Skipping tests with no Docker
 
 ```bash
-./mvnw verify -Dmaven.test.skip=true
+mvn verify -Dmaven.test.skip=true
 ```
 
 ## Configuration precedence
@@ -130,9 +143,10 @@ Spring Boot profile precedence (highest wins):
 | `APP_ENV` | `local` | `local` / `test` / `prod` |
 | `APP_CORRELATION_ID_HEADER_NAME` | `X-Correlation-Id` | Correlation header name |
 
-## Known limitations (Stage 2)
+## Current implementation notes
 
-* Only one Flyway migration (`V1_0__baseline.sql`) exists — the full payment/ledger schema arrives in Stage 3.
-* Kafka is configured but no topics are created automatically yet.
-* The `/internal/health` endpoint is the only API endpoint.
-* No business logic (payments, idempotency, ledger) exists yet.
+* Flyway migrations create the payment, idempotency, and transactional outbox schemas.
+* Kafka topics are created by the `kafka-init` service.
+* Payment and internal health APIs are available; settlement, refunds, chargebacks, and ledger processing remain out of scope.
+* Stage 5 delivery is at-least-once; ERP consumers must deduplicate by event ID.
+* Stage 5 is a handoff, not a green baseline: replay exception/`ChargeResult` contract alignment and integration verification remain pending. See [Stage 5 handoff](stage-5-outbox-kafka-erp.md#12-stage-5-handoff).
