@@ -93,3 +93,26 @@ To add a new simulation scenario:
 2. Return the appropriate `ProviderResult` type.
 3. Document the new prefix in the Javadoc table.
 4. Add a test case in `SimulatedPaymentProcessorTest`.
+
+## Switching to Razorpay Provider
+
+The `SimulatedPaymentProcessor` is active by default (`app.razorpay.enabled=false`). To switch to the Razorpay Orders API integration, set `app.razorpay.enabled=true` and provide the required credentials in `application.yml`:
+
+```yaml
+app:
+  razorpay:
+    enabled: true
+    key-id: "rzp_test_..."
+    key-secret: "..."
+    webhook-secret: "..."
+    base-url: "https://api.razorpay.com/v1"
+```
+
+When enabled:
+- `SimulatedPaymentProcessor`'s `@ConditionalOnProperty(matchIfMissing=true)` excludes it
+- `RazorpayPaymentProcessor`'s `@ConditionalOnProperty(havingValue="true")` activates it
+- `RazorpayConfiguration` creates the `RestClient` bean for API calls
+- `RazorpayWebhookController` exposes `POST /webhooks/razorpay` for callbacks
+- `ChargeService` injects the active `PaymentProcessor` (no code changes needed)
+
+**Key behavioral difference:** The simulated provider returns a final result synchronously (e.g. `success:` → `ProviderResult.success(...)`). The Razorpay provider creates an order and returns `ProviderResult.Type.UNKNOWN` — the payment resolves later via webhook callbacks. See `docs/razorpay-integration.md` for full details.

@@ -72,3 +72,9 @@ app:
       consumer-group: external-erp-payment-events
   erp:
     consumer-group: external-erp-payment-events
+  razorpay:
+    enabled: false
+    key-id: ""
+    key-secret: ""
+    webhook-secret: ""
+    base-url: https://api.razorpay.com/v1

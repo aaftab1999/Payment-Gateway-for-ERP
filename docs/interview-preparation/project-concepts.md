@@ -903,13 +903,19 @@ Flyway 11.3.1 (overridden in pom.xml:39-50). `baseline-on-migrate: true` (per `d
 
 ### F.1 Provider Abstraction
 
-**IMPLEMENTED.** `PaymentProcessor.java` is the port interface (line 39-42). `SimulatedPaymentProcessor.java` is the adapter. Future providers (Stripe, etc.) implement the same interface.
+**IMPLEMENTED.** `PaymentProcessor.java` is the port interface (line 39-42). `SimulatedPaymentProcessor.java` is the default adapter (`@ConditionalOnProperty(matchIfMissing=true)`). `RazorpayPaymentProcessor.java` is an alternative adapter for the Razorpay Orders API (`@ConditionalOnProperty(havingValue="true")`). Future providers (Stripe, etc.) implement the same interface. Only one provider bean is active at a time based on `app.razorpay.enabled`.
 
 ---
 
 ### F.2 Simulated Provider
 
-**IMPLEMENTED.** `SimulatedPaymentProcessor.java` — in-process, deterministic outcomes based on token prefix. Uses `ConcurrentHashMap` for provider idempotency cache.
+**IMPLEMENTED.** `SimulatedPaymentProcessor.java` — in-process, deterministic outcomes based on token prefix. Uses `ConcurrentHashMap` for provider idempotency cache. Active when `app.razorpay.enabled=false` (the default).
+
+---
+
+### F.3 Razorpay Provider
+
+**IMPLEMENTED.** `RazorpayPaymentProcessor.java` (in `infrastructure/external/provider/razorpay/`) — integrates with the Razorpay Orders API (`POST /v1/orders`). Uses Spring's `RestClient` with HTTP Basic auth. The provider idempotency key (`prov_<paymentId>`) is sent as the `receipt` field (UUID portion, ≤ 40 chars). Returns `ProviderResult.Type.UNKNOWN` after order creation — the payment resolves later via webhook callbacks to `POST /webhooks/razorpay`. Webhook signatures are verified via HMAC-SHA256 with constant-time comparison. See `docs/razorpay-integration.md` and `docs/razorpay-code-walkthrough.md`.
 
 ---
 

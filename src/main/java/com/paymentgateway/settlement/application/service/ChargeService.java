@@ -112,7 +112,8 @@ public class ChargeService {
             final String paymentMethodStr,
             final String paymentToken,
             final UUID correlationId,
-            final String idempotencyKey) {
+            final String idempotencyKey,
+            final UUID paymentId) {
 
         PaymentMethodType method = PaymentMethodType.fromCode(paymentMethodStr);
         Currency currency = Currency.fromCode(currencyCode);
@@ -125,8 +126,7 @@ public class ChargeService {
         IdempotencyKey key = IdempotencyKey.of(idempotencyKey);
         String fingerprint = requestFingerprint(merchantId, customerRef, billRef,
                 amountStr, currencyCode, paymentMethodStr, paymentToken);
-        PaymentId typedPaymentId = PaymentId.generate();
-        UUID paymentId = typedPaymentId.toUuid();
+        PaymentId typedPaymentId = PaymentId.of(paymentId);
 
         Optional<IdempotencyOutcome.ReplayOutcome> existing = idempotencyService.replay(
                 merchantId, key);
@@ -217,7 +217,7 @@ public class ChargeService {
             return result;
         });
 
-        return new ChargeResult(updated, false);
+        return new ChargeResult(updated, false, statusCodeFor(updated.getStatus()));
     }
 
     public Payment charge(
@@ -360,6 +360,82 @@ public class ChargeService {
         return entities.stream()
                 .map(e -> e.toDomain(null))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Handles asynchronous provider webhook callbacks (e.g. Razorpay order.paid
+     * or payment.captured events).
+     *
+     * <p><strong>Idempotency:</strong> If the payment has already reached a
+     * terminal state, the call is a no-op. This prevents duplicate webhooks
+     * from corrupting state.</p>
+     *
+     * <p>The payment is resolved from its non-terminal awaiting-resolution
+     * state ({@code UNKNOWN} or {@code REQUIRES_RECONCILIATION}) to the
+     * target terminal state via {@link Payment#resolveReconciliation}.</p>
+     *
+     * @param providerReference the provider's order/payment ID (e.g. Razorpay order ID)
+     * @param result            the resolved outcome from the webhook
+     * @throws EntityNotFoundException if no payment matches the reference
+     */
+    @Transactional
+    public void onProviderWebhook(final String providerReference, final ProviderResult result) {
+        PaymentEntity entity = paymentRepository.findByProviderReference(providerReference)
+                .orElseThrow(() -> new EntityNotFoundException(
+                        "Payment not found for provider reference: " + providerReference));
+
+        Payment payment = entity.toDomain(null);
+
+        if (payment.getStatus().isTerminal()) {
+            log.info("Webhook for payment {} already terminal ({}) — idempotent skip",
+                    payment.getPaymentId(), payment.getStatus());
+            return;
+        }
+
+        PaymentStatus statusBefore = payment.getStatus();
+        payment.resolveReconciliation(
+                mapResultToStatus(result.type()),
+                result.failureCode(),
+                result.failureReason(),
+                result.providerReference() != null
+                        ? result.providerReference()
+                        : providerReference);
+
+        PaymentEventType eventType = PaymentEventType.forStatus(payment.getStatus());
+        String reason = reasonFor(result.type());
+        outboxEventService.append(
+                payment,
+                eventType,
+                statusBefore,
+                reason,
+                null,
+                null,
+                null
+        );
+
+        entity.updateFromDomain(payment);
+        paymentRepository.flush();
+
+        log.info("Webhook resolved payment {}: {} → {} (event={})",
+                payment.getPaymentId(), statusBefore, payment.getStatus(), eventType.wireValue());
+    }
+
+    private static PaymentStatus mapResultToStatus(final ProviderResult.Type type) {
+        return switch (type) {
+            case SUCCESS -> PaymentStatus.SUCCEEDED;
+            case DECLINED -> PaymentStatus.FAILED;
+            case TECHNICAL_FAILURE -> PaymentStatus.FAILED;
+            case UNKNOWN -> PaymentStatus.UNKNOWN;
+        };
+    }
+
+    private static String reasonFor(final ProviderResult.Type type) {
+        return switch (type) {
+            case SUCCESS -> "PROVIDER_SUCCESS";
+            case DECLINED -> "PROVIDER_DECLINED";
+            case TECHNICAL_FAILURE -> "PROVIDER_TECHNICAL_FAILURE";
+            case UNKNOWN -> "PROVIDER_UNKNOWN_OUTCOME";
+        };
     }
 
     // --- Helpers ---

@@ -280,9 +280,29 @@ public sealed interface PaymentProcessor
 
 **Why timeout ≠ failure**: The external provider may have debited the customer but timed out before responding. Treating it as failed would **double-charge** on retry. `UNKNOWN` persists the payment in a non-terminal state awaiting reconciliation/polling. **[POINT OF FAILURE]** — symptom: customer sees "pending" indefinitely; cause: network flap at provider edge; recovery: provider-status poll resolves it.
 
----
+### 6.3 Razorpay Orders API Integration
 
-## 7. Payment state machine
+The gateway supports the **Razorpay Orders API** (`POST /v1/orders`) as an alternative provider. Enabled via `app.razorpay.enabled=true`. Only one provider bean is active at a time — `SimulatedPaymentProcessor` and `RazorpayPaymentProcessor` have complementary `@ConditionalOnProperty` conditions. `ChargeService` injects a single `PaymentProcessor`, so switching providers requires no orchestration changes.
+
+**Async-by-design:** Unlike the synchronous simulator (token prefix determines outcome immediately), the Razorpay provider creates an order but the customer completes payment on Razorpay's frontend. The gateway returns `ProviderResult.Type.UNKNOWN` after order creation; a webhook resolves the payment later.
+
+| Component | File | Responsibility |
+|---|---|---|
+| `RazorpayProperties` | `config/RazorpayProperties.java` | `app.razorpay.*` config binding |
+| `RazorpayConfiguration` | `infrastructure/external/provider/razorpay/RazorpayConfiguration.java` | Creates `RestClient` bean with Basic auth |
+| `RazorpayPaymentProcessor` | `infrastructure/external/provider/razorpay/RazorpayPaymentProcessor.java` | Implements `PaymentProcessor`; creates orders via HTTP |
+| `RazorpayOrderRequest` / `Response` | `infrastructure/external/provider/razorpay/` | Order API request/response records |
+| `RazorpaySignatureVerifier` | `infrastructure/external/provider/razorpay/RazorpaySignatureVerifier.java` | HMAC-SHA256 webhook verification |
+| `RazorpayWebhookEvent` | `infrastructure/external/provider/razorpay/RazorpayWebhookEvent.java` | Webhook payload deserializers |
+| `RazorpayWebhookController` | `api/controller/RazorpayWebhookController.java` | `POST /webhooks/razorpay` endpoint |
+
+**Provider idempotency:** `prov_<paymentId>` is sent as the `receipt` field (UUID portion, ≤ 40 chars). Razorpay deduplicates order creation by this receipt — a retry returns the existing order.
+
+**Webhook resolution:** `payment.captured` / `order.paid` → `UNKNOWN → SUCCEEDED`; `payment.failed` → `UNKNOWN → FAILED`. `payment.authorized` is a no-op (awaiting capture). All webhooks are idempotent — `ChargeService.onProviderWebhook()` skips already-terminal payments.
+
+See `docs/razorpay-integration.md` and `docs/razorpay-code-walkthrough.md` for full implementation details.
+
+---
 
 ```
 CREATED ─reserve(ledger)──▶ AUTHORIZED ─provider.charge──▶

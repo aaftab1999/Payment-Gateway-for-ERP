@@ -6,6 +6,7 @@ import com.paymentgateway.settlement.domain.payment.ProviderResult;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -47,6 +48,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * outcome.</p>
  */
 @Component
+@ConditionalOnProperty(name = "app.razorpay.enabled", havingValue = "false", matchIfMissing = true)
 public class SimulatedPaymentProcessor implements PaymentProcessor {
 
     private static final Logger log = LoggerFactory.getLogger(SimulatedPaymentProcessor.class);

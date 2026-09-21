@@ -3,12 +3,8 @@ package com.paymentgateway.settlement.api.controller;
 import com.paymentgateway.settlement.api.dto.CreatePaymentRequest;
 import com.paymentgateway.settlement.api.dto.PaymentDtoMapper;
 import com.paymentgateway.settlement.api.dto.PaymentResponse;
-import com.paymentgateway.settlement.application.port.IdempotencyOutcome;
-import com.paymentgateway.settlement.application.port.IdempotencyService;
 import com.paymentgateway.settlement.application.service.ChargeResult;
 import com.paymentgateway.settlement.application.service.ChargeService;
-import com.paymentgateway.settlement.domain.idempotency.IdempotencyKey;
-import com.paymentgateway.settlement.domain.idempotency.IdempotencyKeyConflictException;
 import com.paymentgateway.settlement.domain.payment.Payment;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -20,7 +16,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -48,12 +43,9 @@ public class PaymentController {
     private static final Logger log = LoggerFactory.getLogger(PaymentController.class);
 
     private final ChargeService chargeService;
-    private final IdempotencyService idempotencyService;
 
-    public PaymentController(final ChargeService chargeService,
-                             final IdempotencyService idempotencyService) {
+    public PaymentController(final ChargeService chargeService) {
         this.chargeService = chargeService;
-        this.idempotencyService = idempotencyService;
     }
 
     /**
@@ -89,52 +81,11 @@ public class PaymentController {
         }
         String base = baseUrl != null ? baseUrl : "/api/v1";
 
-        log.info("Received payment request: merchant={}, billRef={}, amount={}",
-                body.merchantId(), body.billRef(), body.amount());
+         log.info("Received payment request: merchant={}, billRef={}, amount={}",
+                 body.merchantId(), body.billRef(), body.amount());
 
-        // --- Idempotency reservation (fast path) ---
-        IdempotencyKey key = IdempotencyKey.of(idempotencyKey);
-        String fingerprint = requestFingerprint(body);
-        UUID paymentId = UUID.randomUUID();
-        try {
-            IdempotencyOutcome outcome = idempotencyService.reserve(
-                    body.merchantId(), key, fingerprint, paymentId);
-
-            if (outcome instanceof IdempotencyOutcome.ReplayOutcome replay) {
-                log.info("Idempotent replay for key={}: paymentId={}",
-                        maskKey(idempotencyKey), replay.paymentId());
-                Payment payment = chargeService.getPayment(UUID.fromString(replay.paymentId()));
-                PaymentResponse cached = PaymentDtoMapper.toResponse(payment, base);
-                return ResponseEntity.status(replay.responseStatus() == 201 ? 201 : 200).body(cached);
-            }
-            if (outcome instanceof IdempotencyOutcome.ConflictOutcome conflict) {
-                log.warn("Idempotency conflict for key={}: existingPaymentId={}",
-                        maskKey(idempotencyKey), conflict.existingPaymentId());
-                throw new IdempotencyKeyConflictException(
-                        "Idempotency key reused with different request payload",
-                        idempotencyKey, conflict.existingPaymentId());
-            }
-        } catch (RuntimeException e) {
-            String msg = e.getMessage();
-            if (msg == null || (!msg.contains("23505") && !msg.contains("unique"))) {
-                throw e;
-            }
-            log.info("Idempotency unique violation on key={}, re-reading existing row",
-                    maskKey(idempotencyKey));
-            Optional<IdempotencyOutcome.ReplayOutcome> replay = idempotencyService.replay(
-                    body.merchantId(), key);
-            if (replay.isPresent()) {
-                Payment payment = chargeService.getPayment(
-                        UUID.fromString(replay.get().paymentId()));
-                PaymentResponse cached = PaymentDtoMapper.toResponse(payment, base);
-                return ResponseEntity.status(replay.get().responseStatus() == 201 ? 201 : 200)
-                        .body(cached);
-            }
-            throw new IdempotencyKeyConflictException(
-                    "Idempotency key already in use", idempotencyKey, null);
-        }
-
-        ChargeResult result = chargeService.chargeWithOutcome(
+         UUID paymentId = UUID.randomUUID();
+         ChargeResult result = chargeService.chargeWithOutcome(
                 body.merchantId(),
                 body.customerRef(),
                 body.billRef(),
@@ -191,47 +142,6 @@ public class PaymentController {
     }
 
     // --- Helpers ---
-
-    /**
-     * Computes a deterministic fingerprint of the payment-creation request.
-     *
-     * <p>The fingerprint is used by the idempotency store to distinguish
-     * "same request, retry" from "same key, new request". It is a SHA-256
-     * digest of the canonical request fields, sorted by key for stability.</p>
-     */
-    private static String requestFingerprint(final CreatePaymentRequest body) {
-        try {
-            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            String canonical = "merchantId=" + nullToEmpty(body.merchantId()) +
-                    "|customerRef=" + nullToEmpty(body.customerRef()) +
-                    "|billRef=" + body.billRef() +
-                    "|amount=" + body.amount() +
-                    "|currency=" + body.currency() +
-                    "|method=" + body.paymentMethod() +
-                    "|token=" + maskToken(body.paymentToken());
-            byte[] hash = digest.digest(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : hash) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 not available", e);
-        }
-    }
-
-    private static String nullToEmpty(final String s) {
-        return s == null ? "" : s;
-    }
-
-    private static String maskToken(final String token) {
-        if (token == null || token.isBlank()) return "***";
-        int idx = token.indexOf(':');
-        return idx > 0 ? token.substring(0, idx) + ":*****" : "***";
-    }
-
-    private static String maskKey(final String key) {
-        if (key == null || key.isBlank()) return "***";
-        return key.length() <= 8 ? "***" : key.substring(0, 6) + "*****";
-    }
 
     /**
      * Resolves the correlation ID for a request, matching the policy used by

@@ -54,3 +54,9 @@ app:
   environment: local
   correlation-id:
     header-name: X-Correlation-Id
+  razorpay:
+    enabled: false
+    key-id: ""
+    key-secret: ""
+    webhook-secret: ""
+    base-url: https://api.razorpay.com/v1

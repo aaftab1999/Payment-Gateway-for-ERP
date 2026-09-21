@@ -233,6 +233,9 @@ The interface is NOT sealed (despite `docs/architecture.md:261` showing a
 for provider idempotency caching. All 6 scenarios tested in
 `SimulatedPaymentProcessorTest.java`.
 
+When `app.razorpay.enabled=true`, the simulated provider is replaced by
+`RazorpayPaymentProcessor` (see "razorpay provider" below).
+
 ### provider idempotency key
 **IMPLEMENTED.** See "provider idempotency" above.
 
@@ -439,9 +442,26 @@ has no `CHARGEBACK` state. `docs/architecture.md` does not mention chargebacks.
 Deferred to a future stage.
 
 ### webhook
-**NOT IMPLEMENTED.** No webhook endpoint exists. `PaymentController` has
-no method for receiving provider callbacks. `docs/payment-api.md:250` lists
-"REST callback — DEFERRED; `callbackUrl` is not part of the current request DTO."
+**IMPLEMENTED (Razorpay only).** The `RazorpayWebhookController`
+(`api/controller/RazorpayWebhookController.java`) exposes `POST /webhooks/razorpay`
+when `app.razorpay.enabled=true`. It verifies the `X-Razorpay-Signature` header
+using `RazorpaySignatureVerifier` (HMAC-SHA256, constant-time comparison), then
+dispatches `payment.captured`/`order.paid`/`payment.failed` events to
+`ChargeService.onProviderWebhook()` for state resolution.
+
+**DEFERRED (generic):** A generic webhook/callback endpoint for the simulated
+provider is NOT implemented. `docs/payment-api.md` lists "REST callback — DEFERRED;
+`callbackUrl` is not part of the current request DTO."
+
+### razorpay provider
+**IMPLEMENTED.** `RazorpayPaymentProcessor` in
+`infrastructure/external/provider/razorpay/`. Integrates with the Razorpay Orders
+API (`POST /v1/orders`). Creates orders with `payment_capture=1`, sends the
+provider idempotency key as the `receipt` field (UUID stripped of `prov_` prefix,
+≤ 40 chars). Returns `ProviderResult.Type.UNKNOWN` after order creation — the
+payment resolves later via webhook callbacks. See `docs/razorpay-integration.md`
+for full details. Activated by `app.razorpay.enabled=true`; the simulated processor
+is disabled when this flag is set (complementary `@ConditionalOnProperty` conditions).
 
 ---
 

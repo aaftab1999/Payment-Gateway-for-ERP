@@ -1557,7 +1557,83 @@ I'd rather have a system that's slow but never loses money."
 
 ---
 
-## Question Count: 41 questions
+---
+
+## O. Razorpay Integration (NEW)
+
+### Question 42: How does the gateway integrate with Razorpay?
+
+**What the interviewer is testing:** Understanding of real provider integration patterns,
+webhook security, and the async vs sync distinction.
+
+**Strong answer:** "The gateway has a `RazorpayPaymentProcessor` that implements the
+same `PaymentProcessor` SPI as `SimulatedPaymentProcessor`. It's activated by
+`app.razorpay.enabled=true` via complementary `@ConditionalOnProperty` conditions —
+only one provider bean is active at a time.
+
+The processor creates a Razorpay order via `POST /v1/orders` using Spring's `RestClient`
+with HTTP Basic auth. The provider idempotency key (`prov_<paymentId>`) is sent as the
+`receipt` field — stripped of the `prov_` prefix to fit Razorpay's 40-character limit.
+Razorpay deduplicates order creation by this receipt.
+
+**Key design decision:** The order creation returns `ProviderResult.Type.UNKNOWN`
+(not `SUCCESS`), because the customer hasn't paid yet — they complete the payment
+on Razorpay's Checkout page. The payment resolves later via webhook callbacks
+to `POST /webhooks/razorpay`.
+
+**Webhook flow:**
+1. `RazorpayWebhookController` receives the raw request body and `X-Razorpay-Signature` header.
+2. `RazorpaySignatureVerifier.verify()` recomputes HMAC-SHA256 and compares
+   using `MessageDigest.isEqual` (constant-time, prevents timing attacks).
+3. If valid, the event is parsed and dispatched: `payment.captured` → `UNKNOWN → SUCCEEDED`,
+   `payment.failed` → `UNKNOWN → FAILED`.
+4. `ChargeService.onProviderWebhook()` looks up the payment by `providerReference`
+   (Razorpay order ID), skips if already terminal, and resolves via `Payment.resolveReconciliation()`."
+
+**Important technical details:**
+- `RazorpayConfiguration.java:20-33` — creates `RestClient` bean with Basic auth
+- `RazorpayPaymentProcessor.java:77,130-143` — receipt truncation (strips `prov_` prefix)
+- `RazorpaySignatureVerifier.java:40-52` — HMAC-SHA256 + `MessageDigest.isEqual`
+- `RazorpayWebhookController.java:58-84` — `@RequestBody String rawBody` for signature verification
+- `ChargeService.java:381-421` — `onProviderWebhook()` idempotent resolution
+- `docs/razorpay-integration.md` and `docs/razorpay-code-walkthrough.md` for full details
+
+**Common weak answer to avoid:** "It's just like the simulator but with HTTP calls"
+(without explaining the async webhook resolution model, receipt-based idempotency,
+or signature verification security).
+
+---
+
+### Question 43: Why does the Razorpay processor return UNKNOWN instead of SUCCESS?
+
+**What the interviewer is testing:** Understanding of payment semantics and the
+difference between order creation and payment capture.
+
+**Strong answer:** "A Razorpay order creation (`POST /v1/orders`) does NOT mean
+the customer has paid. It creates an order in `'created'` status — the customer
+must still complete the payment on Razorpay's frontend (via Checkout or Payment
+Button). If we returned `SUCCESS`, the payment would transition to `SUCCEEDED`
+before any money was actually captured — a serious accounting error if the
+customer abandons the checkout.
+
+By returning `UNKNOWN`, the payment enters a non-terminal awaiting-resolution
+state. The recovery scheduler can retry order creation (with the same `receipt`
+for idempotency). When the customer completes payment, Razorpay sends a
+`payment.captured` or `order.paid` webhook that resolves the payment to `SUCCEEDED`.
+If the customer never pays, the payment remains in `UNKNOWN` — visible for
+manual cleanup or timeout handling.
+
+This mirrors the simulator's `timeout:` token behavior — both leave the payment
+non-terminal when the outcome is uncertain."
+
+**Likely follow-up:** "What if the customer never completes the payment?"
+**Answer:** "The payment stays in `UNKNOWN` indefinitely until a reconciliation
+job or manual process resolves it. In production, you'd set a timeout (e.g. 15
+minutes) after which the order is auto-cancelled and the payment marked `FAILED`."
+
+---
+
+## Question Count: 43 questions
 
 All questions reference actual classes, methods, and line numbers from the repository.
 Implementation status is accurately reflected for each topic.

@@ -36,6 +36,8 @@ public interface PaymentRepository extends JpaRepository<PaymentEntity, UUID> {
 
     Optional<PaymentEntity> findByPaymentId(UUID paymentId);
 
+    Optional<PaymentEntity> findByProviderReference(String providerReference);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<PaymentEntity> findAndLockByPaymentId(UUID paymentId);
 
